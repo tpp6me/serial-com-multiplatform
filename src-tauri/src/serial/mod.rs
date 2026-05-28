@@ -2178,6 +2178,49 @@ mod tests {
     }
 
     #[test]
+    fn session_manager_matches_rx_and_logged_counters_for_healthy_log() {
+        let mut manager = SessionManager::new(MockSerialBackend::with_rx(
+            vec![mock_port("/dev/ttyUSB0", "Adapter A")],
+            vec![vec![0x41, 0x42], vec![0x43]],
+        ));
+        let opened = manager
+            .open_session(OpenSessionRequest {
+                config: valid_config_input("/dev/ttyUSB0"),
+                auto_log: None,
+            })
+            .expect("session should open");
+        manager
+            .start_log(
+                &opened.session_id,
+                ".dev-data/test.log".to_string(),
+                LogFormat::Binary,
+                10,
+            )
+            .expect("log should start");
+
+        poll_all_rx(&mut manager, &opened.session_id);
+        let records = manager.drain_log_records(&opened.session_id).unwrap();
+        let logged_payload_bytes = records
+            .iter()
+            .filter(|record| record.direction == crate::logging::LogDirection::Rx)
+            .map(|record| record.payload_len() as u64)
+            .sum();
+        manager
+            .record_logged_bytes(
+                &opened.session_id,
+                logged_payload_bytes,
+                128,
+                ".dev-data/test.log".to_string(),
+            )
+            .unwrap();
+
+        let status = manager.log_status(&opened.session_id).unwrap();
+        assert_eq!(status.rx_bytes, 3);
+        assert_eq!(status.logged_bytes, 3);
+        assert_eq!(status.log_overrun_count, 0);
+    }
+
+    #[test]
     fn session_manager_log_error_pauses_logging_and_keeps_session_connected() {
         let mut manager = SessionManager::new(MockSerialBackend::with_rx(
             vec![mock_port("/dev/ttyUSB0", "Adapter A")],

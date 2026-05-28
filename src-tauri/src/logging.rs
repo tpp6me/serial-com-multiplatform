@@ -100,7 +100,7 @@ pub struct LogMetadata {
 }
 
 pub struct LogWriter {
-    file: File,
+    file: LogFileHandle,
     path_template: PathBuf,
     current_path: PathBuf,
     format: LogFormat,
@@ -111,6 +111,19 @@ pub struct LogWriter {
     segment_index: u64,
     current_period_key: Option<i64>,
     segment_paths: Vec<PathBuf>,
+}
+
+enum LogFileHandle {
+    Real(File),
+    #[cfg(test)]
+    Failing(TestLogFile),
+}
+
+#[cfg(test)]
+struct TestLogFile {
+    len: u64,
+    fail_write_kind: Option<io::ErrorKind>,
+    fail_sync_kind: Option<io::ErrorKind>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -244,14 +257,11 @@ impl LogWriter {
         validate_log_path(&current_path)?;
 
         let header = encode_header(format, metadata)?;
-        let file = open_log_segment(&current_path, options.append)?;
-        let existing_size = file
-            .metadata()
-            .map_err(|source| LogError::Io {
-                path: current_path.clone(),
-                source,
-            })?
-            .len();
+        let file = LogFileHandle::Real(open_log_segment(&current_path, options.append)?);
+        let existing_size = file.len().map_err(|source| LogError::Io {
+            path: current_path.clone(),
+            source,
+        })?;
 
         let mut writer = Self {
             file,
@@ -359,8 +369,10 @@ impl LogWriter {
             record_timestamp_wall_ms,
             self.segment_index,
         );
-        let mut next_file = open_log_segment(&next_path, false)
-            .map_err(|error| io::Error::other(error.to_string()))?;
+        let mut next_file = LogFileHandle::Real(
+            open_log_segment(&next_path, false)
+                .map_err(|error| io::Error::other(error.to_string()))?,
+        );
         let header = encode_header(self.format, &self.metadata)
             .map_err(|error| io::Error::other(error.to_string()))?;
         next_file.write_all(&header)?;
@@ -389,6 +401,64 @@ impl LogWriter {
                     Err(error) => return Err(error),
                 }
             }
+        }
+
+        Ok(())
+    }
+}
+
+impl LogFileHandle {
+    fn write_all(&mut self, bytes: &[u8]) -> Result<(), io::Error> {
+        match self {
+            LogFileHandle::Real(file) => file.write_all(bytes),
+            #[cfg(test)]
+            LogFileHandle::Failing(file) => file.write_all(bytes),
+        }
+    }
+
+    fn flush(&mut self) -> Result<(), io::Error> {
+        match self {
+            LogFileHandle::Real(file) => file.flush(),
+            #[cfg(test)]
+            LogFileHandle::Failing(file) => file.flush(),
+        }
+    }
+
+    fn sync_all(&self) -> Result<(), io::Error> {
+        match self {
+            LogFileHandle::Real(file) => file.sync_all(),
+            #[cfg(test)]
+            LogFileHandle::Failing(file) => file.sync_all(),
+        }
+    }
+
+    fn len(&self) -> Result<u64, io::Error> {
+        match self {
+            LogFileHandle::Real(file) => Ok(file.metadata()?.len()),
+            #[cfg(test)]
+            LogFileHandle::Failing(file) => Ok(file.len),
+        }
+    }
+}
+
+#[cfg(test)]
+impl TestLogFile {
+    fn write_all(&mut self, bytes: &[u8]) -> Result<(), io::Error> {
+        if let Some(kind) = self.fail_write_kind {
+            return Err(io::Error::new(kind, "simulated log write failure"));
+        }
+
+        self.len += bytes.len() as u64;
+        Ok(())
+    }
+
+    fn flush(&mut self) -> Result<(), io::Error> {
+        Ok(())
+    }
+
+    fn sync_all(&self) -> Result<(), io::Error> {
+        if let Some(kind) = self.fail_sync_kind {
+            return Err(io::Error::new(kind, "simulated log sync failure"));
         }
 
         Ok(())
@@ -800,6 +870,45 @@ mod tests {
     }
 
     #[test]
+    fn writer_reports_log_path_unavailable() {
+        let dir = test_dir("path-unavailable");
+        fs::create_dir_all(&dir).unwrap();
+        let parent_file = dir.join("not-a-directory");
+        fs::write(&parent_file, b"blocking file").unwrap();
+        let error = match LogWriter::open(
+            parent_file.join("capture.log"),
+            LogFormat::TimestampedText,
+            false,
+            &test_metadata(),
+        ) {
+            Ok(_) => panic!("file parent should make log path unavailable"),
+            Err(error) => error,
+        };
+
+        assert!(matches!(error, LogError::Io { .. }));
+    }
+
+    #[test]
+    fn writer_surfaces_disk_full_after_logging_starts() {
+        let mut writer = test_writer_with_failing_file(io::ErrorKind::StorageFull);
+        let error = writer
+            .write_records(&[LogRecord::rx(123, b"payload".to_vec())])
+            .expect_err("simulated disk full should fail writes");
+
+        assert_eq!(error.kind(), io::ErrorKind::StorageFull);
+    }
+
+    #[test]
+    fn writer_surfaces_permission_denied_after_logging_starts() {
+        let mut writer = test_writer_with_failing_file(io::ErrorKind::PermissionDenied);
+        let error = writer
+            .write_records(&[LogRecord::rx(123, b"payload".to_vec())])
+            .expect_err("simulated permission loss should fail writes");
+
+        assert_eq!(error.kind(), io::ErrorKind::PermissionDenied);
+    }
+
+    #[test]
     fn resolves_filename_template_tokens_and_sanitizes_port_names() {
         let mut metadata = test_metadata();
         metadata.port_path = "/dev/tty.usbserial-A/B".to_string();
@@ -955,6 +1064,30 @@ mod tests {
             .expect("clock should be after epoch")
             .as_nanos();
         std::env::temp_dir().join(format!("multiserial-log-{name}-{nanos}"))
+    }
+
+    fn test_writer_with_failing_file(kind: io::ErrorKind) -> LogWriter {
+        let metadata = test_metadata();
+        let header_size = encode_header(LogFormat::TimestampedText, &metadata)
+            .unwrap()
+            .len() as u64;
+        LogWriter {
+            file: LogFileHandle::Failing(TestLogFile {
+                len: header_size,
+                fail_write_kind: Some(kind),
+                fail_sync_kind: None,
+            }),
+            path_template: PathBuf::from("capture.log"),
+            current_path: PathBuf::from("capture.log"),
+            format: LogFormat::TimestampedText,
+            metadata,
+            header_size,
+            current_size: header_size,
+            rotation: LogRotationConfig::default(),
+            segment_index: 0,
+            current_period_key: None,
+            segment_paths: vec![PathBuf::from("capture.log")],
+        }
     }
 
     fn binary_record_offset(bytes: &[u8]) -> usize {

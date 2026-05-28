@@ -356,21 +356,21 @@ Goal: byte-accurate logging with explicit failure behavior.
 
 ### 4.5 Failure Modes
 
-- [ ] `LOG-040` Handle disk full.
-- [ ] `LOG-041` Handle log path unavailable.
-- [ ] `LOG-042` Handle permission denied after logging starts.
+- [x] `LOG-040` Handle disk full. Completed 2026-05-28 with deterministic write-failure coverage.
+- [x] `LOG-041` Handle log path unavailable. Completed 2026-05-28.
+- [x] `LOG-042` Handle permission denied after logging starts. Completed 2026-05-28 with deterministic write-failure coverage.
 - [x] `LOG-043` Pause logging on unrecoverable write error. Completed 2026-05-28.
 - [x] `LOG-044` Keep serial session connected after logging failure. Completed 2026-05-28.
 - [x] `LOG-045` Show persistent error status to UI. Completed 2026-05-28 through `serial_log_status`.
 - [x] `LOG-046` Allow choose-new-path recovery. Completed 2026-05-28 at the backend command/session layer.
 - [x] `LOG-047` Allow stop-logging recovery. Completed 2026-05-28.
 - [x] `LOG-048` Increment overrun counter when logger falls behind. Completed 2026-05-28.
-- [~] `LOG-049` Add failure-mode tests. Partial 2026-05-28: simulated unrecoverable log error keeps session connected and exposes persistent error status.
+- [x] `LOG-049` Add failure-mode tests. Completed 2026-05-28 with path-unavailable, disk-full, permission-denied, session-survival, and recovery coverage.
 
 ### 4.6 Phase 3 Exit Gate
 
-- [ ] `GATE-030` Healthy logging has matching RX/logged counters.
-- [ ] `GATE-031` Disk/path failures do not disconnect serial session.
+- [x] `GATE-030` Healthy logging has matching RX/logged counters. Completed 2026-05-28.
+- [x] `GATE-031` Disk/path failures do not disconnect serial session. Completed 2026-05-28.
 - [x] `GATE-032` Binary fixture `00..FF` round-trips through binary log. Completed 2026-05-28.
 - [x] `GATE-033` Rotation tests pass with metadata and counters intact. Completed 2026-05-28.
 
