@@ -111,6 +111,7 @@ pub struct ConfigLoadResult {
 pub enum ConfigError {
     Io { path: PathBuf, source: io::Error },
     Serialize(serde_json::Error),
+    Validation(String),
 }
 
 impl fmt::Display for ConfigError {
@@ -125,6 +126,9 @@ impl fmt::Display for ConfigError {
             }
             ConfigError::Serialize(source) => {
                 write!(formatter, "config serialization error: {source}")
+            }
+            ConfigError::Validation(message) => {
+                write!(formatter, "config validation error: {message}")
             }
         }
     }
@@ -276,6 +280,170 @@ pub fn load_or_create_config(
     })
 }
 
+pub fn save_config(
+    config_dir: impl AsRef<Path>,
+    config: AppConfig,
+) -> Result<ConfigLoadResult, ConfigError> {
+    validate_app_config(&config).map_err(ConfigError::Validation)?;
+
+    let config_dir = config_dir.as_ref();
+    fs::create_dir_all(config_dir).map_err(|source| ConfigError::Io {
+        path: config_dir.to_path_buf(),
+        source,
+    })?;
+
+    let path = config_dir.join("config.json");
+    write_config_atomically(&path, &config)?;
+
+    Ok(ConfigLoadResult {
+        config,
+        path: path.display().to_string(),
+        created: false,
+        migrated: false,
+        backed_up_invalid: false,
+        stripped_unknown_keys: false,
+    })
+}
+
+pub fn validate_app_config(config: &AppConfig) -> Result<(), String> {
+    require(
+        config.schema_version == CURRENT_SCHEMA_VERSION,
+        "unsupported schema version",
+    )?;
+    require(
+        (300..=4_000_000).contains(&config.connection.default_baud_rate),
+        "default baud rate must be between 300 and 4000000",
+    )?;
+    require(
+        matches!(config.connection.default_data_bits, 5..=8),
+        "default data bits must be 5, 6, 7, or 8",
+    )?;
+    require_enum(
+        "default parity",
+        &config.connection.default_parity,
+        &["none", "even", "odd"],
+    )?;
+    require(
+        matches!(config.connection.default_stop_bits, value if value == 1.0 || value == 1.5 || value == 2.0),
+        "default stop bits must be 1, 1.5, or 2",
+    )?;
+    require_enum(
+        "default flow control",
+        &config.connection.default_flow_control,
+        &["none", "software", "hardware"],
+    )?;
+    require(
+        config.connection.reconnect_max_retries <= 100,
+        "reconnect retries must be 100 or lower",
+    )?;
+    require(
+        config.connection.reconnect_backoff_ms <= 60_000,
+        "reconnect backoff must be 60000 ms or lower",
+    )?;
+
+    require_enum(
+        "view mode",
+        &config.display.view_mode,
+        &["ascii", "utf8", "hex"],
+    )?;
+    require(
+        !config.display.font_family.trim().is_empty(),
+        "font family is required",
+    )?;
+    require(
+        (8..=32).contains(&config.display.font_size),
+        "font size must be between 8 and 32",
+    )?;
+    require_enum("theme", &config.display.theme, &["system", "light", "dark"])?;
+    require_enum(
+        "timestamp format",
+        &config.display.timestamp_format,
+        &["time", "iso", "epochMs", "HH:mm:ss.SSS"],
+    )?;
+    require(
+        (100..=1_000_000).contains(&config.display.scrollback_lines),
+        "scrollback lines must be between 100 and 1000000",
+    )?;
+    require_enum(
+        "newline mode",
+        &config.display.newline_mode,
+        &["lf", "crlf", "cr"],
+    )?;
+    require(
+        (10..=60_000).contains(&config.display.partial_line_timeout_ms),
+        "partial line timeout must be between 10 and 60000 ms",
+    )?;
+
+    require(
+        !config.logging.log_directory.trim().is_empty(),
+        "log directory is required",
+    )?;
+    require(
+        !config.logging.filename_template.trim().is_empty(),
+        "log filename template is required",
+    )?;
+    require_enum(
+        "log format",
+        &config.logging.log_format,
+        &["plaintext", "timestamped-text", "binary"],
+    )?;
+    require(
+        (1..=1024).contains(&config.logging.rotation_size_mb),
+        "log rotation size must be between 1 and 1024 MB",
+    )?;
+    require_enum(
+        "rotation period",
+        &config.logging.rotation_period,
+        &["none", "hourly", "daily"],
+    )?;
+    require(
+        config.logging.max_files_to_keep <= 10_000,
+        "max files to keep must be 10000 or lower",
+    )?;
+
+    require_enum(
+        "default line ending",
+        &config.send.default_line_ending,
+        &["none", "lf", "crlf", "cr"],
+    )?;
+    require(
+        config.send.history_size <= 10_000,
+        "send history size must be 10000 or lower",
+    )?;
+    require(
+        (1..=65_536).contains(&config.send.file_send_chunk_bytes),
+        "file send chunk size must be between 1 and 65536 bytes",
+    )?;
+    require(
+        config.send.file_send_pacing_ms <= 60_000,
+        "file send pacing must be 60000 ms or lower",
+    )?;
+    require(
+        (1..=60_000).contains(&config.send.automation_max_sends_per_minute),
+        "automation sends per minute must be between 1 and 60000",
+    )?;
+    require(
+        (50..=60_000).contains(&config.send.automation_min_interval_ms),
+        "automation minimum interval must be between 50 and 60000 ms",
+    )?;
+
+    require(
+        (1..=4096).contains(&config.filters.regex_max_length_chars),
+        "regex max length must be between 1 and 4096 characters",
+    )?;
+    require(
+        (1..=1000).contains(&config.filters.regex_timeout_ms),
+        "regex timeout must be between 1 and 1000 ms",
+    )?;
+    require_enum(
+        "release channel",
+        &config.updates.release_channel,
+        &["stable", "beta", "nightly"],
+    )?;
+
+    Ok(())
+}
+
 fn migrate_config_value(mut value: Value) -> MigrationResult {
     let schema_version = value
         .get("schemaVersion")
@@ -292,6 +460,21 @@ fn migrate_config_value(mut value: Value) -> MigrationResult {
     }
 
     MigrationResult { value, migrated }
+}
+
+fn require(condition: bool, message: &str) -> Result<(), String> {
+    if condition {
+        Ok(())
+    } else {
+        Err(message.to_string())
+    }
+}
+
+fn require_enum(field: &str, value: &str, allowed: &[&str]) -> Result<(), String> {
+    require(
+        allowed.contains(&value),
+        &format!("{field} must be one of {}", allowed.join(", ")),
+    )
 }
 
 fn write_config_atomically(path: &Path, config: &AppConfig) -> Result<(), ConfigError> {
@@ -396,6 +579,31 @@ mod tests {
 
         assert!(result.migrated);
         assert_eq!(result.config.schema_version, CURRENT_SCHEMA_VERSION);
+    }
+
+    #[test]
+    fn saves_valid_config_atomically() {
+        let dir = test_dir("save");
+        let mut config = AppConfig::default_v1();
+        config.connection.default_baud_rate = 9600;
+
+        let result = save_config(&dir, config.clone()).expect("config should save");
+
+        assert_eq!(result.config, config);
+        assert!(dir.join("config.json").exists());
+        assert!(!dir.join("config.json.tmp").exists());
+    }
+
+    #[test]
+    fn rejects_invalid_config_before_save() {
+        let dir = test_dir("reject");
+        let mut config = AppConfig::default_v1();
+        config.display.font_size = 2;
+
+        let error = save_config(&dir, config).expect_err("invalid config should fail");
+
+        assert!(error.to_string().contains("font size"));
+        assert!(!dir.join("config.json").exists());
     }
 
     fn test_dir(name: &str) -> PathBuf {

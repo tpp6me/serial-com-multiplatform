@@ -2,7 +2,7 @@ mod config;
 mod logging;
 mod serial;
 
-use config::{load_or_create_config, AppConfig, ConfigLoadResult};
+use config::{load_or_create_config, save_config as save_app_config, AppConfig, ConfigLoadResult};
 use logging::{
     AutoLogRequest, LogFormat, LogRotationConfig, LogStatus, LogWriter, LogWriterOptions,
     StartLogRequest, StopLogRequest, StopLogResult,
@@ -11,13 +11,15 @@ use serde::Serialize;
 use serial::{
     apply_config_to_builder, list_ports_with, transition, validate_serial_config,
     CloseSessionResult, HotplugPollResult, OpenSessionRequest, OpenSessionResult,
-    RealSerialBackend, RxBatch, SerialConfig, SerialConfigInput, SerialPortSummary, SessionEvent,
-    SessionManager, SessionState, SetLineSignalRequest, SetLineSignalResult, WriteRequest,
-    WriteResult, HOTPLUG_POLL_INTERVAL_MS, RX_BATCH_INTERVAL_MS,
+    PlatformHotplugSource, RealSerialBackend, RxBatch, SerialConfig, SerialConfigInput,
+    SerialPortSummary, SessionEvent, SessionManager, SessionState, SetLineSignalRequest,
+    SetLineSignalResult, WriteRequest, WriteResult, RX_BATCH_INTERVAL_MS,
 };
 use std::env;
+use std::fs;
 use std::io;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
+use std::process::Command;
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
@@ -46,15 +48,29 @@ struct BuildMetadata {
     profile: &'static str,
 }
 
+#[derive(Debug, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct OpenPathRequest {
+    path: String,
+    kind: OpenPathKind,
+}
+
+#[derive(Debug, serde::Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+enum OpenPathKind {
+    File,
+    Directory,
+}
+
 #[tauri::command]
 fn environment_info() -> EnvironmentInfo {
     EnvironmentInfo {
         app_name: "MultiSerial",
         app_version: env!("CARGO_PKG_VERSION"),
         environment: env::var("MULTISERIAL_ENV").unwrap_or_else(|_| "production".to_string()),
-        config_dir: env_path("MULTISERIAL_CONFIG_DIR", ".dev-data/config"),
-        log_dir: env_path("MULTISERIAL_LOG_DIR", ".dev-data/logs"),
-        temp_dir: env_path("MULTISERIAL_TEMP_DIR", ".dev-data/tmp"),
+        config_dir: env_path("MULTISERIAL_CONFIG_DIR", default_config_dir),
+        log_dir: env_path("MULTISERIAL_LOG_DIR", default_log_dir),
+        temp_dir: env_path("MULTISERIAL_TEMP_DIR", default_temp_dir),
     }
 }
 
@@ -75,8 +91,19 @@ fn load_config() -> Result<ConfigLoadResult, String> {
 }
 
 #[tauri::command]
+fn save_config(config: AppConfig) -> Result<ConfigLoadResult, String> {
+    save_app_config(config_dir(), config).map_err(|error| error.to_string())
+}
+
+#[tauri::command]
 fn default_config() -> AppConfig {
     AppConfig::default_v1()
+}
+
+#[tauri::command]
+fn open_path(request: OpenPathRequest) -> Result<(), String> {
+    let target = resolve_open_target(&request).map_err(|error| error.to_string())?;
+    open_platform_path(&target).map_err(|error| error.to_string())
 }
 
 #[tauri::command]
@@ -173,6 +200,18 @@ fn serial_write(
 }
 
 #[tauri::command]
+fn serial_automated_write(
+    manager: tauri::State<'_, AppSessionManager>,
+    request: WriteRequest,
+) -> Result<WriteResult, String> {
+    manager
+        .lock()
+        .map_err(|_| "serial session manager lock poisoned".to_string())?
+        .write_automated(request)
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
 fn serial_set_dtr(
     manager: tauri::State<'_, AppSessionManager>,
     request: SetLineSignalRequest,
@@ -262,7 +301,7 @@ fn start_log_for_session(
     request: AutoLogRequest,
 ) -> Result<LogStatus, String> {
     let format = LogFormat::try_from(request.format.as_str()).map_err(|error| error.to_string())?;
-    let path = PathBuf::from(&request.path);
+    let path = expand_tilde_path(&request.path);
     let metadata = {
         let manager = manager
             .lock()
@@ -333,18 +372,124 @@ fn serial_log_status(
         .map_err(|error| error.to_string())
 }
 
-fn env_path(key: &str, fallback: &str) -> String {
+fn env_path(key: &str, fallback: fn() -> PathBuf) -> String {
     env::var(key)
         .map(PathBuf::from)
-        .unwrap_or_else(|_| PathBuf::from(fallback))
+        .unwrap_or_else(|_| fallback())
         .display()
         .to_string()
+}
+
+fn resolve_open_target(request: &OpenPathRequest) -> io::Result<PathBuf> {
+    let path = expand_tilde_path(&request.path);
+
+    match request.kind {
+        OpenPathKind::File => {
+            if !path.is_file() {
+                return Err(io::Error::new(
+                    io::ErrorKind::NotFound,
+                    format!("log file does not exist: {}", path.display()),
+                ));
+            }
+        }
+        OpenPathKind::Directory => {
+            fs::create_dir_all(&path)?;
+            if !path.is_dir() {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    format!("log directory is not a directory: {}", path.display()),
+                ));
+            }
+        }
+    }
+
+    Ok(path)
+}
+
+fn expand_tilde_path(path: &str) -> PathBuf {
+    if path == "~" {
+        return env::var("HOME")
+            .map(PathBuf::from)
+            .unwrap_or_else(|_| PathBuf::from(path));
+    }
+
+    if let Some(remainder) = path.strip_prefix("~/") {
+        if let Ok(home) = env::var("HOME") {
+            return Path::new(&home).join(remainder);
+        }
+    }
+
+    PathBuf::from(path)
+}
+
+fn open_platform_path(path: &Path) -> io::Result<()> {
+    let status = if cfg!(target_os = "macos") {
+        Command::new("open").arg(path).status()?
+    } else if cfg!(target_os = "windows") {
+        Command::new("explorer").arg(path).status()?
+    } else {
+        Command::new("xdg-open").arg(path).status()?
+    };
+
+    if status.success() {
+        Ok(())
+    } else {
+        Err(io::Error::other(format!(
+            "open command failed with status {status}"
+        )))
+    }
 }
 
 fn config_dir() -> PathBuf {
     env::var("MULTISERIAL_CONFIG_DIR")
         .map(PathBuf::from)
-        .unwrap_or_else(|_| PathBuf::from(".dev-data/config"))
+        .unwrap_or_else(|_| default_config_dir())
+}
+
+fn default_config_dir() -> PathBuf {
+    if cfg!(target_os = "macos") {
+        home_dir()
+            .map(|home| home.join("Library/Application Support/MultiSerial"))
+            .unwrap_or_else(|| PathBuf::from("MultiSerial/config"))
+    } else if cfg!(target_os = "windows") {
+        env::var("APPDATA")
+            .map(|app_data| PathBuf::from(app_data).join("MultiSerial"))
+            .or_else(|_| {
+                home_dir()
+                    .map(|home| home.join("AppData/Roaming/MultiSerial"))
+                    .ok_or(env::VarError::NotPresent)
+            })
+            .unwrap_or_else(|_| PathBuf::from("MultiSerial/config"))
+    } else {
+        env::var("XDG_CONFIG_HOME")
+            .map(|config_home| PathBuf::from(config_home).join("MultiSerial"))
+            .or_else(|_| {
+                home_dir()
+                    .map(|home| home.join(".config/MultiSerial"))
+                    .ok_or(env::VarError::NotPresent)
+            })
+            .unwrap_or_else(|_| PathBuf::from("MultiSerial/config"))
+    }
+}
+
+fn default_log_dir() -> PathBuf {
+    home_dir()
+        .map(|home| home.join("MultiSerial/logs"))
+        .unwrap_or_else(|| PathBuf::from("MultiSerial/logs"))
+}
+
+fn default_temp_dir() -> PathBuf {
+    env::temp_dir().join("MultiSerial")
+}
+
+fn home_dir() -> Option<PathBuf> {
+    env::var("HOME").map(PathBuf::from).ok().or_else(|| {
+        if cfg!(target_os = "windows") {
+            env::var("USERPROFILE").map(PathBuf::from).ok()
+        } else {
+            None
+        }
+    })
 }
 
 fn start_serial_rx_worker(
@@ -497,6 +642,7 @@ fn mark_serial_log_error(manager: &AppSessionManager, session_id: &str, error: i
 
 fn start_serial_hotplug_worker(manager: AppSessionManager, app: tauri::AppHandle) {
     thread::spawn(move || {
+        let hotplug_source = PlatformHotplugSource::current();
         let mut known_ports = manager
             .lock()
             .ok()
@@ -504,7 +650,7 @@ fn start_serial_hotplug_worker(manager: AppSessionManager, app: tauri::AppHandle
             .unwrap_or_default();
 
         loop {
-            thread::sleep(Duration::from_millis(HOTPLUG_POLL_INTERVAL_MS));
+            hotplug_source.wait_for_change_hint();
 
             let poll_result = {
                 let Ok(mut manager) = manager.lock() else {
@@ -557,6 +703,9 @@ pub fn run() {
     tauri::Builder::default()
         .manage(session_manager)
         .setup(move |app| {
+            #[cfg(not(any(target_os = "android", target_os = "ios")))]
+            app.handle()
+                .plugin(tauri_plugin_updater::Builder::new().build())?;
             start_serial_hotplug_worker(hotplug_manager.clone(), app.handle().clone());
             Ok(())
         })
@@ -564,7 +713,9 @@ pub fn run() {
             environment_info,
             build_metadata,
             load_config,
+            save_config,
             default_config,
+            open_path,
             list_serial_ports,
             validate_serial_settings,
             validate_backend_serial_settings,
@@ -573,6 +724,7 @@ pub fn run() {
             close_serial_session,
             reconnect_serial_session,
             serial_write,
+            serial_automated_write,
             serial_set_dtr,
             serial_set_rts,
             serial_drain_rx,
@@ -591,13 +743,44 @@ mod tests {
     use super::*;
 
     #[test]
-    fn environment_info_uses_dev_data_fallbacks() {
+    fn environment_info_reports_active_data_paths() {
         let info = environment_info();
 
         assert_eq!(info.app_name, "MultiSerial");
-        assert_eq!(info.config_dir, ".dev-data/config");
-        assert_eq!(info.log_dir, ".dev-data/logs");
-        assert_eq!(info.temp_dir, ".dev-data/tmp");
+        assert_eq!(
+            info.config_dir,
+            env::var("MULTISERIAL_CONFIG_DIR")
+                .map(|path| PathBuf::from(path).display().to_string())
+                .unwrap_or_else(|_| default_config_dir().display().to_string())
+        );
+        assert_eq!(
+            info.log_dir,
+            env::var("MULTISERIAL_LOG_DIR")
+                .map(|path| PathBuf::from(path).display().to_string())
+                .unwrap_or_else(|_| default_log_dir().display().to_string())
+        );
+        assert_eq!(
+            info.temp_dir,
+            env::var("MULTISERIAL_TEMP_DIR")
+                .map(|path| PathBuf::from(path).display().to_string())
+                .unwrap_or_else(|_| default_temp_dir().display().to_string())
+        );
+    }
+
+    #[test]
+    fn production_default_paths_do_not_use_dev_data() {
+        assert!(!default_config_dir()
+            .display()
+            .to_string()
+            .contains(".dev-data"));
+        assert!(!default_log_dir()
+            .display()
+            .to_string()
+            .contains(".dev-data"));
+        assert!(!default_temp_dir()
+            .display()
+            .to_string()
+            .contains(".dev-data"));
     }
 
     #[test]
@@ -607,5 +790,26 @@ mod tests {
         assert_eq!(metadata.app_name, "MultiSerial");
         assert!(!metadata.app_version.is_empty());
         assert!(!metadata.git_commit.contains("tty"));
+    }
+
+    #[test]
+    fn open_path_resolution_expands_home_directory() {
+        let home = env::var("HOME").expect("HOME should exist in test environment");
+
+        let target = expand_tilde_path("~/MultiSerial");
+
+        assert!(target.starts_with(home));
+    }
+
+    #[test]
+    fn open_path_resolution_rejects_missing_file() {
+        let request = OpenPathRequest {
+            path: ".dev-data/does-not-exist/missing.log".to_string(),
+            kind: OpenPathKind::File,
+        };
+
+        let error = resolve_open_target(&request).expect_err("missing file should fail");
+
+        assert_eq!(error.kind(), io::ErrorKind::NotFound);
     }
 }

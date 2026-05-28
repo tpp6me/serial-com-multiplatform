@@ -4,7 +4,7 @@ import reactRefresh from "eslint-plugin-react-refresh";
 import tseslint from "typescript-eslint";
 
 export default tseslint.config(
-  { ignores: ["dist", "src-tauri/target", "node_modules"] },
+  { ignores: [".dev-data", "dist", "src-tauri/target", "node_modules"] },
   js.configs.recommended,
   ...tseslint.configs.recommended,
   {

@@ -6,6 +6,7 @@ export default defineConfig({
   test: {
     environment: "jsdom",
     globals: true,
+    exclude: ["tests/e2e/**", "node_modules/**", "dist/**", "src-tauri/target/**"],
     setupFiles: ["src/test/setup.ts"]
   }
 });

@@ -9,8 +9,14 @@ use std::io::{ErrorKind, Read, Write};
 use std::time::Duration;
 use std::time::{SystemTime, UNIX_EPOCH};
 
+mod hotplug;
+
+pub use hotplug::PlatformHotplugSource;
+
 pub const RX_BATCH_INTERVAL_MS: u64 = 16;
 pub const HOTPLUG_POLL_INTERVAL_MS: u64 = 1000;
+pub const AUTOMATION_MAX_SENDS_PER_MINUTE: u32 = 1000;
+const AUTOMATION_RATE_WINDOW_MS: u128 = 60_000;
 const RX_QUEUE_CAPACITY_BYTES: usize = 1024 * 1024;
 const RX_READ_CHUNK_SIZE: usize = 4096;
 
@@ -116,6 +122,7 @@ pub struct WriteResult {
     pub session_id: String,
     pub bytes_written: usize,
     pub tx_bytes: u64,
+    pub dropped_automated_sends: u64,
     pub timestamp_wall_ms: u128,
 }
 
@@ -204,6 +211,9 @@ struct SerialSession {
     tx_bytes: u64,
     rx_bytes: u64,
     dropped_rx_bytes: u64,
+    automated_send_window_started_ms: u128,
+    automated_send_count_in_window: u32,
+    dropped_automated_sends: u64,
     next_rx_sequence: u64,
     rx_queue_bytes: usize,
     rx_queue_capacity_bytes: usize,
@@ -305,7 +315,8 @@ impl SerialPortHandle for RealSerialPortHandle {
     }
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "mock-serial"))]
+#[cfg_attr(feature = "mock-serial", allow(dead_code))]
 #[derive(Debug, Clone)]
 struct MockSerialBackend {
     ports: Vec<SerialPortSummary>,
@@ -315,7 +326,8 @@ struct MockSerialBackend {
     line_events: std::sync::Arc<std::sync::Mutex<Vec<(SignalLine, bool)>>>,
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "mock-serial"))]
+#[cfg_attr(feature = "mock-serial", allow(dead_code))]
 impl MockSerialBackend {
     fn new(ports: Vec<SerialPortSummary>) -> Self {
         Self {
@@ -365,7 +377,7 @@ impl MockSerialBackend {
     }
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "mock-serial"))]
 impl SerialBackend for MockSerialBackend {
     fn list_ports(&self) -> Result<Vec<SerialPortSummary>, SerialError> {
         Ok(self.ports.clone())
@@ -388,7 +400,8 @@ impl SerialBackend for MockSerialBackend {
     }
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "mock-serial"))]
+#[cfg_attr(feature = "mock-serial", allow(dead_code))]
 #[derive(Debug, Default)]
 struct MockSerialPortHandle {
     written: Vec<u8>,
@@ -397,7 +410,7 @@ struct MockSerialPortHandle {
     line_events: std::sync::Arc<std::sync::Mutex<Vec<(SignalLine, bool)>>>,
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "mock-serial"))]
 impl SerialPortHandle for MockSerialPortHandle {
     fn write_bytes(&mut self, bytes: &[u8]) -> Result<usize, SerialError> {
         let bytes_written = self.max_write_len.unwrap_or(bytes.len()).min(bytes.len());
@@ -825,6 +838,9 @@ impl<B: SerialBackend> SessionManager<B> {
                 tx_bytes: 0,
                 rx_bytes: 0,
                 dropped_rx_bytes: 0,
+                automated_send_window_started_ms: 0,
+                automated_send_count_in_window: 0,
+                dropped_automated_sends: 0,
                 next_rx_sequence: 1,
                 rx_queue_bytes: 0,
                 rx_queue_capacity_bytes: RX_QUEUE_CAPACITY_BYTES,
@@ -958,6 +974,18 @@ impl<B: SerialBackend> SessionManager<B> {
     }
 
     pub fn write(&mut self, request: WriteRequest) -> Result<WriteResult, SerialError> {
+        self.write_with_automation_rate_limit(request, false)
+    }
+
+    pub fn write_automated(&mut self, request: WriteRequest) -> Result<WriteResult, SerialError> {
+        self.write_with_automation_rate_limit(request, true)
+    }
+
+    fn write_with_automation_rate_limit(
+        &mut self,
+        request: WriteRequest,
+        automated: bool,
+    ) -> Result<WriteResult, SerialError> {
         let session = self.sessions.get_mut(&request.session_id).ok_or_else(|| {
             SerialError::SessionNotFound {
                 session_id: request.session_id.clone(),
@@ -976,7 +1004,21 @@ impl<B: SerialBackend> SessionManager<B> {
                 session_id: request.session_id,
                 bytes_written: 0,
                 tx_bytes: session.tx_bytes,
+                dropped_automated_sends: session.dropped_automated_sends,
                 timestamp_wall_ms: timestamp_wall_ms(),
+            });
+        }
+
+        let timestamp_wall_ms = timestamp_wall_ms();
+
+        if automated && !allow_automated_send(session, timestamp_wall_ms) {
+            session.dropped_automated_sends += 1;
+            return Ok(WriteResult {
+                session_id: request.session_id,
+                bytes_written: 0,
+                tx_bytes: session.tx_bytes,
+                dropped_automated_sends: session.dropped_automated_sends,
+                timestamp_wall_ms,
             });
         }
 
@@ -988,7 +1030,6 @@ impl<B: SerialBackend> SessionManager<B> {
                 state: session.state,
             })?;
 
-        let timestamp_wall_ms = timestamp_wall_ms();
         let bytes_written = port.write_bytes(&request.bytes)?;
         session.tx_bytes += bytes_written as u64;
         if bytes_written > 0 {
@@ -1014,6 +1055,7 @@ impl<B: SerialBackend> SessionManager<B> {
             session_id: request.session_id,
             bytes_written,
             tx_bytes: session.tx_bytes,
+            dropped_automated_sends: session.dropped_automated_sends,
             timestamp_wall_ms,
         })
     }
@@ -1390,6 +1432,23 @@ fn push_rx_chunk(session: &mut SerialSession, mut chunk: RxChunk) {
     session.rx_queue.push_back(chunk);
 }
 
+fn allow_automated_send(session: &mut SerialSession, timestamp_wall_ms: u128) -> bool {
+    if session.automated_send_window_started_ms == 0
+        || timestamp_wall_ms.saturating_sub(session.automated_send_window_started_ms)
+            >= AUTOMATION_RATE_WINDOW_MS
+    {
+        session.automated_send_window_started_ms = timestamp_wall_ms;
+        session.automated_send_count_in_window = 0;
+    }
+
+    if session.automated_send_count_in_window >= AUTOMATION_MAX_SENDS_PER_MINUTE {
+        return false;
+    }
+
+    session.automated_send_count_in_window += 1;
+    true
+}
+
 fn push_log_record(session: &mut SerialSession, mut record: LogRecord) {
     let Some(logger) = &mut session.logger else {
         return;
@@ -1741,6 +1800,37 @@ mod tests {
         assert_eq!(first.tx_bytes, 2);
         assert_eq!(second.bytes_written, 2);
         assert_eq!(second.tx_bytes, 4);
+    }
+
+    #[test]
+    fn session_manager_rate_limits_automated_writes() {
+        let mut manager = SessionManager::new(MockSerialBackend::new(vec![mock_port(
+            "/dev/ttyUSB0",
+            "Adapter A",
+        )]));
+        let opened = manager
+            .open_session(OpenSessionRequest {
+                config: valid_config_input("/dev/ttyUSB0"),
+                auto_log: None,
+            })
+            .expect("session should open");
+
+        let mut last = None;
+        for _ in 0..=AUTOMATION_MAX_SENDS_PER_MINUTE {
+            last = Some(
+                manager
+                    .write_automated(WriteRequest {
+                        session_id: opened.session_id.clone(),
+                        bytes: vec![0x41],
+                    })
+                    .expect("automated write should not error"),
+            );
+        }
+
+        let last = last.expect("at least one result");
+        assert_eq!(last.bytes_written, 0);
+        assert_eq!(last.tx_bytes, AUTOMATION_MAX_SENDS_PER_MINUTE as u64);
+        assert_eq!(last.dropped_automated_sends, 1);
     }
 
     #[test]
@@ -2175,6 +2265,62 @@ mod tests {
         assert_eq!(stopped.status.logged_bytes, 12);
         assert_eq!(stopped.status.current_size, 22);
         assert_eq!(stopped.status.path.as_deref(), Some(".dev-data/next.log"));
+    }
+
+    #[test]
+    fn session_manager_keeps_log_status_independent_per_session() {
+        let mut manager = SessionManager::new(MockSerialBackend::new(vec![
+            mock_port("/dev/ttyUSB0", "Adapter A"),
+            mock_port("/dev/ttyUSB1", "Adapter B"),
+        ]));
+        let session_a = manager
+            .open_session(OpenSessionRequest {
+                config: valid_config_input("/dev/ttyUSB0"),
+                auto_log: None,
+            })
+            .expect("first session should open");
+        let session_b = manager
+            .open_session(OpenSessionRequest {
+                config: valid_config_input("/dev/ttyUSB1"),
+                auto_log: None,
+            })
+            .expect("second session should open");
+
+        manager
+            .start_log(
+                &session_a.session_id,
+                ".dev-data/a.log".to_string(),
+                LogFormat::PlainText,
+                0,
+            )
+            .expect("first log should start");
+        manager
+            .start_log(
+                &session_b.session_id,
+                ".dev-data/b.log".to_string(),
+                LogFormat::Binary,
+                0,
+            )
+            .expect("second log should start");
+        manager
+            .record_logged_bytes(&session_a.session_id, 5, 15, ".dev-data/a.log".to_string())
+            .unwrap();
+        manager
+            .mark_log_error(&session_b.session_id, "disk full".to_string())
+            .unwrap();
+
+        let status_a = manager.log_status(&session_a.session_id).unwrap();
+        let status_b = manager.log_status(&session_b.session_id).unwrap();
+
+        assert!(status_a.active);
+        assert_eq!(status_a.path.as_deref(), Some(".dev-data/a.log"));
+        assert_eq!(status_a.format, Some(LogFormat::PlainText));
+        assert_eq!(status_a.logged_bytes, 5);
+        assert!(status_a.error.is_none());
+        assert!(!status_b.active);
+        assert_eq!(status_b.path.as_deref(), Some(".dev-data/b.log"));
+        assert_eq!(status_b.format, Some(LogFormat::Binary));
+        assert_eq!(status_b.error.as_deref(), Some("disk full"));
     }
 
     #[test]

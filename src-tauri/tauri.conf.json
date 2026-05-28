@@ -1,8 +1,9 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
   "productName": "MultiSerial",
+  "mainBinaryName": "multiSerial",
   "version": "0.1.0",
-  "identifier": "dev.multiserial.desktop",
+  "identifier": "com.bifrostsscom.multiserial",
   "build": {
     "beforeDevCommand": "corepack pnpm dev",
     "beforeBuildCommand": "corepack pnpm build",
@@ -23,9 +24,86 @@
       "csp": null
     }
   },
+  "plugins": {
+    "updater": {
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDk5MUQ1NTNEQzJENTQxMDIKUldRQ1FkWENQVlVkbVh0OFd6b290QTVzNmJpZ0FNRnpqcDEzQ3lET3dBc1VzOE14bkV0cXZaWXEK",
+      "endpoints": [
+        "https://updates.bifrost-sscom.com/multiserial/{{target}}/{{arch}}/{{current_version}}"
+      ],
+      "windows": {
+        "installMode": "passive"
+      }
+    }
+  },
   "bundle": {
     "active": true,
     "targets": ["dmg", "nsis", "appimage", "deb"],
-    "icon": []
+    "createUpdaterArtifacts": true,
+    "publisher": "Bifrost SSCOM",
+    "category": "DeveloperTool",
+    "shortDescription": "Multi-port serial terminal for desktop diagnostics.",
+    "longDescription": "MultiSerial is a desktop serial terminal for monitoring, sending, logging, and reconnecting multiple serial devices.",
+    "copyright": "Copyright (c) 2026 tpp6me",
+    "license": "MIT",
+    "licenseFile": "../LICENSE",
+    "resources": {
+      "../LICENSE": "LICENSE",
+      "../THIRD_PARTY_NOTICES.md": "THIRD_PARTY_NOTICES.md"
+    },
+    "macOS": {
+      "minimumSystemVersion": "10.13",
+      "hardenedRuntime": true,
+      "dmg": {
+        "windowSize": {
+          "width": 660,
+          "height": 400
+        },
+        "appPosition": {
+          "x": 180,
+          "y": 170
+        },
+        "applicationFolderPosition": {
+          "x": 480,
+          "y": 170
+        }
+      }
+    },
+    "windows": {
+      "webviewInstallMode": {
+        "type": "downloadBootstrapper",
+        "silent": true
+      },
+      "allowDowngrades": false,
+      "nsis": {
+        "installerIcon": "icons/icon.ico",
+        "uninstallerIcon": "icons/icon.ico",
+        "installMode": "currentUser",
+        "languages": ["English"],
+        "displayLanguageSelector": false,
+        "compression": "lzma",
+        "startMenuFolder": "Bifrost SSCOM"
+      }
+    },
+    "linux": {
+      "appimage": {
+        "bundleMediaFramework": false
+      },
+      "deb": {
+        "depends": [
+          "libwebkit2gtk-4.1-0 | libwebkit2gtk-4.0-37",
+          "libgtk-3-0",
+          "libayatana-appindicator3-1"
+        ],
+        "section": "utils",
+        "priority": "optional"
+      }
+    },
+    "icon": [
+      "icons/32x32.png",
+      "icons/128x128.png",
+      "icons/128x128@2x.png",
+      "icons/icon.icns",
+      "icons/icon.ico"
+    ]
   }
 }

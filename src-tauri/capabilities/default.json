@@ -3,5 +3,31 @@
   "identifier": "default",
   "description": "Default permissions for the main MultiSerial window.",
   "windows": ["main"],
-  "permissions": ["core:default"]
+  "permissions": [
+    "core:default",
+    "updater:default",
+    "allow-environment-info",
+    "allow-build-metadata",
+    "allow-load-config",
+    "allow-save-config",
+    "allow-default-config",
+    "allow-open-path",
+    "allow-list-serial-ports",
+    "allow-validate-serial-settings",
+    "allow-validate-backend-serial-settings",
+    "allow-next-session-state",
+    "allow-open-serial-session",
+    "allow-close-serial-session",
+    "allow-reconnect-serial-session",
+    "allow-serial-write",
+    "allow-serial-automated-write",
+    "allow-serial-set-dtr",
+    "allow-serial-set-rts",
+    "allow-serial-drain-rx",
+    "allow-serial-session-state",
+    "allow-serial-session-config",
+    "allow-serial-start-log",
+    "allow-serial-stop-log",
+    "allow-serial-log-status"
+  ]
 }

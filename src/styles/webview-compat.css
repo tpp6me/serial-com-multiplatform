@@ -1,0 +1,36 @@
+.platform-linux {
+  text-rendering: optimizeLegibility;
+  -webkit-font-smoothing: antialiased;
+  font-synthesis-weight: none;
+}
+
+.platform-linux button,
+.platform-linux input,
+.platform-linux select,
+.platform-linux textarea {
+  font-weight: 400;
+}
+
+.platform-linux .top-bar h1,
+.platform-linux .filter-section h2,
+.platform-linux .settings-section h3 {
+  font-weight: 600;
+}
+
+.platform-linux .terminal-panel,
+.platform-linux .terminal-viewport,
+.platform-linux .terminal-rows,
+.platform-linux .terminal-row,
+.platform-linux .terminal-status,
+.platform-linux .status-banner {
+  animation: none;
+  transition: none;
+}
+
+.platform-linux .terminal-panel,
+.platform-linux .terminal-viewport {
+  backface-visibility: hidden;
+  contain: content;
+  transform: none;
+  will-change: auto;
+}

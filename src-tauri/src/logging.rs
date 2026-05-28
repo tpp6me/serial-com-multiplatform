@@ -2,7 +2,7 @@ use serde::{Deserialize, Serialize};
 use std::fmt;
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, Write};
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 
 pub const LOG_QUEUE_CAPACITY_BYTES: usize = 1024 * 1024;
 
@@ -536,17 +536,88 @@ fn validate_log_path(path: &Path) -> Result<(), LogError> {
         });
     }
 
-    if path.file_name().is_none() {
+    if path
+        .components()
+        .any(|component| component == Component::ParentDir)
+    {
+        return Err(LogError::InvalidPath {
+            path: path.to_path_buf(),
+            message: "parent directory traversal is not allowed".to_string(),
+        });
+    }
+
+    if path.to_string_lossy().chars().any(char::is_control) {
+        return Err(LogError::InvalidPath {
+            path: path.to_path_buf(),
+            message: "control characters are not allowed".to_string(),
+        });
+    }
+
+    let Some(file_name) = path.file_name() else {
         return Err(LogError::InvalidPath {
             path: path.to_path_buf(),
             message: "path must include a file name".to_string(),
         });
-    }
+    };
+
+    validate_log_file_name(path, &file_name.to_string_lossy())?;
 
     if path.is_dir() {
         return Err(LogError::InvalidPath {
             path: path.to_path_buf(),
             message: "path points to a directory".to_string(),
+        });
+    }
+
+    if let Ok(metadata) = fs::symlink_metadata(path) {
+        let file_type = metadata.file_type();
+
+        if file_type.is_symlink() {
+            return Err(LogError::InvalidPath {
+                path: path.to_path_buf(),
+                message: "path points to a symbolic link".to_string(),
+            });
+        }
+
+        if !file_type.is_file() {
+            return Err(LogError::InvalidPath {
+                path: path.to_path_buf(),
+                message: "existing path is not a regular file".to_string(),
+            });
+        }
+    }
+
+    Ok(())
+}
+
+fn validate_log_file_name(path: &Path, file_name: &str) -> Result<(), LogError> {
+    if file_name.ends_with([' ', '.']) {
+        return Err(LogError::InvalidPath {
+            path: path.to_path_buf(),
+            message: "file name must not end with a space or dot".to_string(),
+        });
+    }
+
+    let reserved_name = file_name
+        .split_once('.')
+        .map_or(file_name, |(name, _)| name)
+        .trim_end_matches([' ', '.'])
+        .to_ascii_uppercase();
+
+    let reserved = matches!(reserved_name.as_str(), "CON" | "PRN" | "AUX" | "NUL")
+        || reserved_name
+            .strip_prefix("COM")
+            .and_then(|suffix| suffix.parse::<u8>().ok())
+            .is_some_and(|number| (1..=9).contains(&number))
+        || reserved_name
+            .strip_prefix("LPT")
+            .and_then(|suffix| suffix.parse::<u8>().ok())
+            .is_some_and(|number| (1..=9).contains(&number));
+
+    if reserved {
+        return Err(LogError::InvalidPath {
+            path: path.to_path_buf(),
+            message: "file name is reserved on Windows".to_string(),
         });
     }
 
@@ -886,6 +957,47 @@ mod tests {
         };
 
         assert!(matches!(error, LogError::Io { .. }));
+    }
+
+    #[test]
+    fn writer_rejects_unsafe_log_paths() {
+        let dir = test_dir("unsafe-paths");
+        let metadata = test_metadata();
+
+        for path in [
+            dir.join("..").join("escape.log"),
+            dir.join("bad\nname.log"),
+            dir.join("CON.log"),
+            dir.join("capture."),
+        ] {
+            let error = match LogWriter::open(&path, LogFormat::TimestampedText, false, &metadata) {
+                Ok(_) => panic!("unsafe log path should be rejected"),
+                Err(error) => error,
+            };
+
+            assert!(matches!(error, LogError::InvalidPath { .. }));
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn writer_rejects_symbolic_link_log_path() {
+        use std::os::unix::fs::symlink;
+
+        let dir = test_dir("symlink-path");
+        fs::create_dir_all(&dir).unwrap();
+        let target = dir.join("target.log");
+        let link = dir.join("capture.log");
+        fs::write(&target, b"existing").unwrap();
+        symlink(&target, &link).unwrap();
+
+        let error =
+            match LogWriter::open(&link, LogFormat::TimestampedText, false, &test_metadata()) {
+                Ok(_) => panic!("symlink log path should be rejected"),
+                Err(error) => error,
+            };
+
+        assert!(matches!(error, LogError::InvalidPath { .. }));
     }
 
     #[test]

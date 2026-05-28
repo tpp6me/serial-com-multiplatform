@@ -43,8 +43,37 @@ corepack pnpm dev
 corepack pnpm tauri:dev
 corepack pnpm typecheck
 corepack pnpm test
+corepack pnpm test:e2e
 corepack pnpm rust:test
 ```
+
+## Test Isolation
+
+Test scripts run through `scripts/run-with-test-env.mjs`.
+
+- Config: `.dev-data/test-config`
+- Logs: `.dev-data/test-logs`
+- Temp files: `.dev-data/test-tmp`
+- Playwright reports: `.dev-data/test-results/playwright` and `.dev-data/playwright-report`
+
+The wrapper removes the test config, log, and temp directories before and after each test command. Rust tests that need ad hoc scratch space use the OS temporary directory and do not write to user MultiSerial paths.
+
+For fully hermetic Rust dependency caches, set project-local Cargo paths before running Rust commands:
+
+```bash
+CARGO_HOME="$PWD/.dev-data/cargo-home" CARGO_TARGET_DIR="$PWD/.dev-data/cargo-target" corepack pnpm rust:test
+```
+
+## Playwright Browser Cache
+
+Playwright is a project dev dependency. Browser binaries must stay outside global caches:
+
+```bash
+PLAYWRIGHT_BROWSERS_PATH=.dev-data/playwright-browsers corepack pnpm exec playwright install chromium
+corepack pnpm test:e2e
+```
+
+`playwright.config.ts` sets `PLAYWRIGHT_BROWSERS_PATH` to `.dev-data/playwright-browsers` by default and writes reports under `.dev-data/`.
 
 ## Global Prerequisites
 

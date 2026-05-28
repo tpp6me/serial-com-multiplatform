@@ -11,6 +11,10 @@ rust-version = "1.89"
 name = "multi_serial_lib"
 crate-type = ["staticlib", "cdylib", "rlib"]
 
+[features]
+default = []
+mock-serial = []
+
 [build-dependencies]
 tauri-build = { version = "2", features = [] }
 
@@ -19,3 +23,9 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 serialport = "4.7"
 tauri = { version = "2", features = [] }
+
+[dev-dependencies]
+sha2 = "0.10"
+
+[target.'cfg(not(any(target_os = "android", target_os = "ios")))'.dependencies]
+tauri-plugin-updater = "2"
