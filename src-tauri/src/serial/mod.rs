@@ -1,3 +1,6 @@
+use crate::logging::{
+    LogFormat, LogMetadata, LogRecord, LogStatus, StopLogResult, LOG_QUEUE_CAPACITY_BYTES,
+};
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, VecDeque};
 use std::fmt;
@@ -203,6 +206,21 @@ struct SerialSession {
     rx_queue_capacity_bytes: usize,
     rx_queue: VecDeque<RxChunk>,
     rx_worker_running: bool,
+    logger: Option<SessionLogger>,
+}
+
+struct SessionLogger {
+    path: String,
+    format: LogFormat,
+    active: bool,
+    logged_bytes: u64,
+    log_overrun_count: u64,
+    current_size: u64,
+    queued_bytes: usize,
+    queue_capacity_bytes: usize,
+    queue: VecDeque<LogRecord>,
+    worker_running: bool,
+    error: Option<String>,
 }
 
 #[derive(Debug, Default)]
@@ -792,6 +810,7 @@ impl<B: SerialBackend> SessionManager<B> {
                 rx_queue_capacity_bytes: RX_QUEUE_CAPACITY_BYTES,
                 rx_queue: VecDeque::new(),
                 rx_worker_running: false,
+                logger: None,
             },
         );
 
@@ -1015,6 +1034,10 @@ impl<B: SerialBackend> SessionManager<B> {
         session.next_rx_sequence += 1;
         session.rx_bytes += bytes_read as u64;
         push_rx_chunk(session, chunk.clone());
+        push_log_record(
+            session,
+            LogRecord::rx(chunk.timestamp_wall_ms, chunk.bytes.clone()),
+        );
 
         Ok(Some(chunk))
     }
@@ -1088,6 +1111,177 @@ impl<B: SerialBackend> SessionManager<B> {
             })
     }
 
+    pub fn log_metadata(&self, session_id: &str) -> Result<LogMetadata, SerialError> {
+        let session =
+            self.sessions
+                .get(session_id)
+                .ok_or_else(|| SerialError::SessionNotFound {
+                    session_id: session_id.to_string(),
+                })?;
+
+        Ok(LogMetadata {
+            session_id: session_id.to_string(),
+            port_path: session.config.port_path.clone(),
+            baud_rate: session.config.baud_rate,
+            data_bits: session.config.data_bits,
+            parity: session.config.parity.clone(),
+            stop_bits: session.config.stop_bits.clone(),
+            flow_control: session.config.flow_control.clone(),
+            started_at_wall_ms: timestamp_wall_ms(),
+        })
+    }
+
+    pub fn start_log(
+        &mut self,
+        session_id: &str,
+        path: String,
+        format: LogFormat,
+        current_size: u64,
+    ) -> Result<LogStatus, SerialError> {
+        let session =
+            self.sessions
+                .get_mut(session_id)
+                .ok_or_else(|| SerialError::SessionNotFound {
+                    session_id: session_id.to_string(),
+                })?;
+
+        if session
+            .logger
+            .as_ref()
+            .is_some_and(|logger| logger.active || logger.worker_running)
+        {
+            return Err(SerialError::UnsupportedConfig {
+                field: "logging",
+                message: "a log is already active for this session".to_string(),
+            });
+        }
+
+        session.logger = Some(SessionLogger {
+            path,
+            format,
+            active: true,
+            logged_bytes: 0,
+            log_overrun_count: 0,
+            current_size,
+            queued_bytes: 0,
+            queue_capacity_bytes: LOG_QUEUE_CAPACITY_BYTES,
+            queue: VecDeque::new(),
+            worker_running: false,
+            error: None,
+        });
+
+        Ok(log_status_for_session(session_id, session))
+    }
+
+    pub fn request_stop_log(&mut self, session_id: &str) -> Result<StopLogResult, SerialError> {
+        let session =
+            self.sessions
+                .get_mut(session_id)
+                .ok_or_else(|| SerialError::SessionNotFound {
+                    session_id: session_id.to_string(),
+                })?;
+
+        if let Some(logger) = &mut session.logger {
+            logger.active = false;
+        }
+
+        Ok(StopLogResult {
+            session_id: session_id.to_string(),
+            status: log_status_for_session(session_id, session),
+        })
+    }
+
+    pub fn log_status(&self, session_id: &str) -> Result<LogStatus, SerialError> {
+        let session =
+            self.sessions
+                .get(session_id)
+                .ok_or_else(|| SerialError::SessionNotFound {
+                    session_id: session_id.to_string(),
+                })?;
+
+        Ok(log_status_for_session(session_id, session))
+    }
+
+    pub fn mark_log_worker_started(&mut self, session_id: &str) -> Result<bool, SerialError> {
+        let session =
+            self.sessions
+                .get_mut(session_id)
+                .ok_or_else(|| SerialError::SessionNotFound {
+                    session_id: session_id.to_string(),
+                })?;
+        let Some(logger) = &mut session.logger else {
+            return Ok(false);
+        };
+
+        if logger.worker_running {
+            return Ok(false);
+        }
+
+        logger.worker_running = true;
+        Ok(true)
+    }
+
+    pub fn mark_log_worker_stopped(&mut self, session_id: &str) {
+        if let Some(session) = self.sessions.get_mut(session_id) {
+            if let Some(logger) = &mut session.logger {
+                logger.worker_running = false;
+            }
+        }
+    }
+
+    pub fn drain_log_records(&mut self, session_id: &str) -> Result<Vec<LogRecord>, SerialError> {
+        let session =
+            self.sessions
+                .get_mut(session_id)
+                .ok_or_else(|| SerialError::SessionNotFound {
+                    session_id: session_id.to_string(),
+                })?;
+        let Some(logger) = &mut session.logger else {
+            return Ok(Vec::new());
+        };
+
+        let records = logger.queue.drain(..).collect();
+        logger.queued_bytes = 0;
+        Ok(records)
+    }
+
+    pub fn record_logged_bytes(
+        &mut self,
+        session_id: &str,
+        logged_bytes: u64,
+        current_size: u64,
+    ) -> Result<(), SerialError> {
+        let session =
+            self.sessions
+                .get_mut(session_id)
+                .ok_or_else(|| SerialError::SessionNotFound {
+                    session_id: session_id.to_string(),
+                })?;
+
+        if let Some(logger) = &mut session.logger {
+            logger.logged_bytes += logged_bytes;
+            logger.current_size = current_size;
+        }
+
+        Ok(())
+    }
+
+    pub fn mark_log_error(&mut self, session_id: &str, message: String) -> Result<(), SerialError> {
+        let session =
+            self.sessions
+                .get_mut(session_id)
+                .ok_or_else(|| SerialError::SessionNotFound {
+                    session_id: session_id.to_string(),
+                })?;
+
+        if let Some(logger) = &mut session.logger {
+            logger.active = false;
+            logger.error = Some(message);
+        }
+
+        Ok(())
+    }
+
     fn allocate_session_id(&mut self) -> String {
         let session_id = format!("session-{}", self.next_session_number);
         self.next_session_number += 1;
@@ -1154,6 +1348,65 @@ fn push_rx_chunk(session: &mut SerialSession, mut chunk: RxChunk) {
 
     session.rx_queue_bytes += chunk.bytes.len();
     session.rx_queue.push_back(chunk);
+}
+
+fn push_log_record(session: &mut SerialSession, mut record: LogRecord) {
+    let Some(logger) = &mut session.logger else {
+        return;
+    };
+
+    if !logger.active || logger.error.is_some() {
+        return;
+    }
+
+    let record_len = record.payload_len();
+    if record_len > logger.queue_capacity_bytes {
+        let bytes_to_keep = logger.queue_capacity_bytes;
+        record.bytes = record.bytes[record_len - bytes_to_keep..].to_vec();
+        logger.log_overrun_count += 1;
+    }
+
+    while logger.queued_bytes + record.payload_len() > logger.queue_capacity_bytes {
+        let Some(dropped) = logger.queue.pop_front() else {
+            break;
+        };
+
+        logger.queued_bytes -= dropped.payload_len();
+        logger.log_overrun_count += 1;
+    }
+
+    logger.queued_bytes += record.payload_len();
+    logger.queue.push_back(record);
+}
+
+fn log_status_for_session(session_id: &str, session: &SerialSession) -> LogStatus {
+    let Some(logger) = &session.logger else {
+        return LogStatus {
+            session_id: session_id.to_string(),
+            active: false,
+            path: None,
+            format: None,
+            rx_bytes: session.rx_bytes,
+            logged_bytes: 0,
+            log_overrun_count: 0,
+            current_size: 0,
+            queued_bytes: 0,
+            error: None,
+        };
+    };
+
+    LogStatus {
+        session_id: session_id.to_string(),
+        active: logger.active,
+        path: Some(logger.path.clone()),
+        format: Some(logger.format),
+        rx_bytes: session.rx_bytes,
+        logged_bytes: logger.logged_bytes,
+        log_overrun_count: logger.log_overrun_count,
+        current_size: logger.current_size,
+        queued_bytes: logger.queued_bytes,
+        error: logger.error.clone(),
+    }
 }
 
 fn timestamp_wall_ms() -> u128 {
@@ -1666,6 +1919,116 @@ mod tests {
         assert_eq!(batch.chunks.len(), 3);
         assert_eq!(batch.chunks[0].bytes, vec![7; 8]);
         assert_eq!(batch.chunks[2].bytes, vec![9; 8]);
+    }
+
+    #[test]
+    fn session_manager_queues_rx_records_for_active_log() {
+        let mut manager = SessionManager::new(MockSerialBackend::with_rx(
+            vec![mock_port("/dev/ttyUSB0", "Adapter A")],
+            vec![vec![0x41, 0x42], vec![0x43]],
+        ));
+        let opened = manager
+            .open_session(OpenSessionRequest {
+                config: valid_config_input("/dev/ttyUSB0"),
+            })
+            .expect("session should open");
+
+        let status = manager
+            .start_log(
+                &opened.session_id,
+                ".dev-data/test.log".to_string(),
+                LogFormat::TimestampedText,
+                128,
+            )
+            .expect("log should start");
+
+        assert!(status.active);
+        assert_eq!(status.current_size, 128);
+
+        poll_all_rx(&mut manager, &opened.session_id);
+        let queued_status = manager.log_status(&opened.session_id).unwrap();
+        let records = manager.drain_log_records(&opened.session_id).unwrap();
+
+        assert_eq!(queued_status.rx_bytes, 3);
+        assert_eq!(queued_status.queued_bytes, 3);
+        assert_eq!(records.len(), 2);
+        assert_eq!(records[0].bytes, vec![0x41, 0x42]);
+        assert_eq!(records[1].bytes, vec![0x43]);
+        assert_eq!(
+            manager.log_status(&opened.session_id).unwrap().queued_bytes,
+            0
+        );
+    }
+
+    #[test]
+    fn session_manager_bounds_log_queue_without_blocking_rx_queue() {
+        let scripted_rx = (0..5).map(|value| vec![value; 4]).collect();
+        let mut manager = SessionManager::new(MockSerialBackend::with_rx(
+            vec![mock_port("/dev/ttyUSB0", "Adapter A")],
+            scripted_rx,
+        ));
+        let opened = manager
+            .open_session(OpenSessionRequest {
+                config: valid_config_input("/dev/ttyUSB0"),
+            })
+            .expect("session should open");
+        manager
+            .start_log(
+                &opened.session_id,
+                ".dev-data/test.log".to_string(),
+                LogFormat::Binary,
+                0,
+            )
+            .expect("log should start");
+        manager
+            .sessions
+            .get_mut(&opened.session_id)
+            .and_then(|session| session.logger.as_mut())
+            .expect("logger should exist")
+            .queue_capacity_bytes = 8;
+
+        poll_all_rx(&mut manager, &opened.session_id);
+        let log_status = manager.log_status(&opened.session_id).unwrap();
+        let rx_batch = manager.drain_rx(&opened.session_id).unwrap();
+        let log_records = manager.drain_log_records(&opened.session_id).unwrap();
+
+        assert_eq!(rx_batch.rx_bytes, 20);
+        assert_eq!(rx_batch.chunks.len(), 5);
+        assert_eq!(log_status.queued_bytes, 8);
+        assert_eq!(log_status.log_overrun_count, 3);
+        assert_eq!(log_records.len(), 2);
+        assert_eq!(log_records[0].bytes, vec![3; 4]);
+        assert_eq!(log_records[1].bytes, vec![4; 4]);
+    }
+
+    #[test]
+    fn session_manager_tracks_logged_bytes_and_stop_status() {
+        let mut manager = SessionManager::new(MockSerialBackend::new(vec![mock_port(
+            "/dev/ttyUSB0",
+            "Adapter A",
+        )]));
+        let opened = manager
+            .open_session(OpenSessionRequest {
+                config: valid_config_input("/dev/ttyUSB0"),
+            })
+            .expect("session should open");
+
+        manager
+            .start_log(
+                &opened.session_id,
+                ".dev-data/test.log".to_string(),
+                LogFormat::PlainText,
+                10,
+            )
+            .unwrap();
+        manager
+            .record_logged_bytes(&opened.session_id, 12, 22)
+            .unwrap();
+        let stopped = manager.request_stop_log(&opened.session_id).unwrap();
+
+        assert!(!stopped.status.active);
+        assert_eq!(stopped.status.logged_bytes, 12);
+        assert_eq!(stopped.status.current_size, 22);
     }
 
     #[test]

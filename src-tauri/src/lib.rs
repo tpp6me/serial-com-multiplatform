@@ -1,7 +1,9 @@
 mod config;
+mod logging;
 mod serial;
 
 use config::{load_or_create_config, AppConfig, ConfigLoadResult};
+use logging::{LogFormat, LogStatus, LogWriter, StartLogRequest, StopLogRequest, StopLogResult};
 use serde::Serialize;
 use serial::{
     apply_config_to_builder, list_ports_with, transition, validate_serial_config,
@@ -11,6 +13,7 @@ use serial::{
     WriteResult, HOTPLUG_POLL_INTERVAL_MS, RX_BATCH_INTERVAL_MS,
 };
 use std::env;
+use std::io;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::thread;
@@ -218,6 +221,67 @@ fn serial_session_config(
         .map_err(|error| error.to_string())
 }
 
+#[tauri::command]
+fn serial_start_log(
+    manager: tauri::State<'_, AppSessionManager>,
+    request: StartLogRequest,
+) -> Result<LogStatus, String> {
+    let format = LogFormat::try_from(request.format.as_str()).map_err(|error| error.to_string())?;
+    let path = PathBuf::from(&request.path);
+    let metadata = {
+        let manager = manager
+            .lock()
+            .map_err(|_| "serial session manager lock poisoned".to_string())?;
+        let status = manager
+            .log_status(&request.session_id)
+            .map_err(|error| error.to_string())?;
+
+        if status.active {
+            return Err("a log is already active for this session".to_string());
+        }
+
+        manager
+            .log_metadata(&request.session_id)
+            .map_err(|error| error.to_string())?
+    };
+    let writer = LogWriter::open(&path, format, request.append, &metadata)
+        .map_err(|error| error.to_string())?;
+    let current_size = writer.current_size();
+    let status = manager
+        .lock()
+        .map_err(|_| "serial session manager lock poisoned".to_string())?
+        .start_log(&request.session_id, request.path, format, current_size)
+        .map_err(|error| error.to_string())?;
+
+    start_serial_log_worker(manager.inner().clone(), request.session_id, writer)?;
+
+    Ok(status)
+}
+
+#[tauri::command]
+fn serial_stop_log(
+    manager: tauri::State<'_, AppSessionManager>,
+    request: StopLogRequest,
+) -> Result<StopLogResult, String> {
+    manager
+        .lock()
+        .map_err(|_| "serial session manager lock poisoned".to_string())?
+        .request_stop_log(&request.session_id)
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+fn serial_log_status(
+    manager: tauri::State<'_, AppSessionManager>,
+    session_id: String,
+) -> Result<LogStatus, String> {
+    manager
+        .lock()
+        .map_err(|_| "serial session manager lock poisoned".to_string())?
+        .log_status(&session_id)
+        .map_err(|error| error.to_string())
+}
+
 fn env_path(key: &str, fallback: &str) -> String {
     env::var(key)
         .map(PathBuf::from)
@@ -295,6 +359,84 @@ fn start_serial_rx_worker(
     });
 
     Ok(())
+}
+
+fn start_serial_log_worker(
+    manager: AppSessionManager,
+    session_id: String,
+    mut writer: LogWriter,
+) -> Result<(), String> {
+    let should_start = manager
+        .lock()
+        .map_err(|_| "serial session manager lock poisoned".to_string())?
+        .mark_log_worker_started(&session_id)
+        .map_err(|error| error.to_string())?;
+
+    if !should_start {
+        return Ok(());
+    }
+
+    thread::spawn(move || {
+        loop {
+            let records = {
+                let Ok(mut manager) = manager.lock() else {
+                    break;
+                };
+
+                match manager.drain_log_records(&session_id) {
+                    Ok(records) => records,
+                    Err(_) => break,
+                }
+            };
+
+            if !records.is_empty() {
+                match writer.write_records(&records) {
+                    Ok(logged_bytes) => {
+                        if let Ok(mut manager) = manager.lock() {
+                            let _ = manager.record_logged_bytes(
+                                &session_id,
+                                logged_bytes,
+                                writer.current_size(),
+                            );
+                        }
+                    }
+                    Err(error) => {
+                        mark_serial_log_error(&manager, &session_id, error);
+                        break;
+                    }
+                }
+            }
+
+            let should_stop = {
+                let Ok(manager) = manager.lock() else {
+                    break;
+                };
+
+                match manager.log_status(&session_id) {
+                    Ok(status) => !status.active && status.queued_bytes == 0,
+                    Err(_) => true,
+                }
+            };
+
+            if should_stop {
+                break;
+            }
+
+            thread::sleep(Duration::from_millis(10));
+        }
+
+        if let Ok(mut manager) = manager.lock() {
+            manager.mark_log_worker_stopped(&session_id);
+        }
+    });
+
+    Ok(())
+}
+
+fn mark_serial_log_error(manager: &AppSessionManager, session_id: &str, error: io::Error) {
+    if let Ok(mut manager) = manager.lock() {
+        let _ = manager.mark_log_error(session_id, error.to_string());
+    }
 }
 
 fn start_serial_hotplug_worker(manager: AppSessionManager, app: tauri::AppHandle) {
@@ -379,7 +521,10 @@ pub fn run() {
             serial_set_rts,
             serial_drain_rx,
             serial_session_state,
-            serial_session_config
+            serial_session_config,
+            serial_start_log,
+            serial_stop_log,
+            serial_log_status
         ])
         .run(tauri::generate_context!())
         .expect("failed to run MultiSerial");

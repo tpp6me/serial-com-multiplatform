@@ -312,36 +312,36 @@ Goal: byte-accurate logging with explicit failure behavior.
 
 ### 4.1 Logger Architecture
 
-- [ ] `LOG-001` Implement logger task per session.
-- [ ] `LOG-002` Use bounded queue between RX path and logger.
-- [ ] `LOG-003` Ensure logger cannot block serial RX loop.
-- [ ] `LOG-004` Maintain `rx_bytes`.
-- [ ] `LOG-005` Maintain `logged_bytes`.
-- [ ] `LOG-006` Maintain `log_overrun_count`.
-- [ ] `LOG-007` Expose current log path.
-- [ ] `LOG-008` Expose current log size.
+- [x] `LOG-001` Implement logger task per session. Completed 2026-05-28.
+- [x] `LOG-002` Use bounded queue between RX path and logger. Completed 2026-05-28.
+- [x] `LOG-003` Ensure logger cannot block serial RX loop. Completed 2026-05-28.
+- [x] `LOG-004` Maintain `rx_bytes`. Completed 2026-05-28.
+- [x] `LOG-005` Maintain `logged_bytes`. Completed 2026-05-28.
+- [x] `LOG-006` Maintain `log_overrun_count`. Completed 2026-05-28.
+- [x] `LOG-007` Expose current log path. Completed 2026-05-28.
+- [x] `LOG-008` Expose current log size. Completed 2026-05-28.
 
 ### 4.2 Log Start/Stop
 
 - [ ] `LOG-010` Implement auto-log-on-connect option.
 - [ ] `LOG-011` Ensure auto-log starts before first byte is received.
-- [ ] `LOG-012` Implement manual start without disconnect.
-- [ ] `LOG-013` Implement manual stop without disconnect.
-- [ ] `LOG-014` Implement append mode.
-- [ ] `LOG-015` Implement overwrite mode.
-- [ ] `LOG-016` Create log directory if missing.
-- [ ] `LOG-017` Reject unsafe or unsupported log paths.
+- [x] `LOG-012` Implement manual start without disconnect. Completed 2026-05-28.
+- [x] `LOG-013` Implement manual stop without disconnect. Completed 2026-05-28.
+- [x] `LOG-014` Implement append mode. Completed 2026-05-28.
+- [x] `LOG-015` Implement overwrite mode. Completed 2026-05-28.
+- [x] `LOG-016` Create log directory if missing. Completed 2026-05-28.
+- [~] `LOG-017` Reject unsafe or unsupported log paths. Basic empty-path/file-name/directory validation completed 2026-05-28; stronger path policy remains.
 
 ### 4.3 Formats
 
-- [ ] `LOG-020` Implement plain text ASCII log format.
-- [ ] `LOG-021` Implement timestamped text log format.
-- [ ] `LOG-022` Implement raw binary log format.
-- [ ] `LOG-023` Write session metadata header.
-- [ ] `LOG-024` Prefix RX in timestamped logs if LOG-10 remains in scope.
+- [x] `LOG-020` Implement plain text ASCII log format. Completed 2026-05-28.
+- [x] `LOG-021` Implement timestamped text log format. Completed 2026-05-28.
+- [x] `LOG-022` Implement raw binary log format. Completed 2026-05-28.
+- [x] `LOG-023` Write session metadata header. Completed 2026-05-28.
+- [x] `LOG-024` Prefix RX in timestamped logs if LOG-10 remains in scope. Completed 2026-05-28.
 - [ ] `LOG-025` Prefix TX in timestamped logs if LOG-10 remains in scope.
-- [ ] `LOG-026` Preserve raw bytes in binary logs.
-- [ ] `LOG-027` Include segment byte count or CRC for binary logs.
+- [x] `LOG-026` Preserve raw bytes in binary logs. Completed 2026-05-28.
+- [x] `LOG-027` Include segment byte count or CRC for binary logs. Completed 2026-05-28 with segment byte counts.
 
 ### 4.4 Rotation
 
@@ -363,8 +363,8 @@ Goal: byte-accurate logging with explicit failure behavior.
 - [ ] `LOG-044` Keep serial session connected after logging failure.
 - [ ] `LOG-045` Show persistent error status to UI.
 - [ ] `LOG-046` Allow choose-new-path recovery.
-- [ ] `LOG-047` Allow stop-logging recovery.
-- [ ] `LOG-048` Increment overrun counter when logger falls behind.
+- [x] `LOG-047` Allow stop-logging recovery. Completed 2026-05-28.
+- [x] `LOG-048` Increment overrun counter when logger falls behind. Completed 2026-05-28.
 - [ ] `LOG-049` Add failure-mode tests.
 
 ### 4.6 Phase 3 Exit Gate
