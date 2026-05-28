@@ -295,8 +295,8 @@ Goal: reliable single-session serial I/O and lifecycle.
 - [x] `SER-074` Update port list after insertion. Completed 2026-05-28 through `serial-port-list-changed` event payload.
 - [x] `SER-075` Update port list after removal. Completed 2026-05-28 through `serial-port-list-changed` event payload.
 - [x] `SER-076` Transition active session to Hot-unplugged on removal. Completed 2026-05-28.
-- [ ] `SER-077` Implement manual DTR toggle.
-- [ ] `SER-078` Implement manual RTS toggle.
+- [x] `SER-077` Implement manual DTR toggle. Completed 2026-05-28.
+- [x] `SER-078` Implement manual RTS toggle. Completed 2026-05-28.
 - [ ] `SER-079` Add best-effort CTS/DSR/DCD/RI read only if v1.1/could scope is pulled forward.
 
 ### 3.8 Phase 2 Exit Gate

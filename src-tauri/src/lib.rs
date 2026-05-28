@@ -7,8 +7,8 @@ use serial::{
     apply_config_to_builder, list_ports_with, transition, validate_serial_config,
     CloseSessionResult, HotplugPollResult, OpenSessionRequest, OpenSessionResult,
     RealSerialBackend, RxBatch, SerialConfig, SerialConfigInput, SerialPortSummary, SessionEvent,
-    SessionManager, SessionState, WriteRequest, WriteResult, HOTPLUG_POLL_INTERVAL_MS,
-    RX_BATCH_INTERVAL_MS,
+    SessionManager, SessionState, SetLineSignalRequest, SetLineSignalResult, WriteRequest,
+    WriteResult, HOTPLUG_POLL_INTERVAL_MS, RX_BATCH_INTERVAL_MS,
 };
 use std::env;
 use std::path::PathBuf;
@@ -150,6 +150,30 @@ fn serial_write(
         .lock()
         .map_err(|_| "serial session manager lock poisoned".to_string())?
         .write(request)
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+fn serial_set_dtr(
+    manager: tauri::State<'_, AppSessionManager>,
+    request: SetLineSignalRequest,
+) -> Result<SetLineSignalResult, String> {
+    manager
+        .lock()
+        .map_err(|_| "serial session manager lock poisoned".to_string())?
+        .set_dtr(request)
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+fn serial_set_rts(
+    manager: tauri::State<'_, AppSessionManager>,
+    request: SetLineSignalRequest,
+) -> Result<SetLineSignalResult, String> {
+    manager
+        .lock()
+        .map_err(|_| "serial session manager lock poisoned".to_string())?
+        .set_rts(request)
         .map_err(|error| error.to_string())
 }
 
@@ -351,6 +375,8 @@ pub fn run() {
             close_serial_session,
             reconnect_serial_session,
             serial_write,
+            serial_set_dtr,
+            serial_set_rts,
             serial_drain_rx,
             serial_session_state,
             serial_session_config

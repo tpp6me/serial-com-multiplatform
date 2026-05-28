@@ -31,6 +31,8 @@ pub trait SerialBackend {
 pub trait SerialPortHandle: Send {
     fn write_bytes(&mut self, bytes: &[u8]) -> Result<usize, SerialError>;
     fn read_available(&mut self, buffer: &mut [u8]) -> Result<usize, SerialError>;
+    fn set_data_terminal_ready(&mut self, enabled: bool) -> Result<(), SerialError>;
+    fn set_request_to_send(&mut self, enabled: bool) -> Result<(), SerialError>;
 }
 
 #[derive(Debug, Clone, Deserialize, PartialEq)]
@@ -108,6 +110,29 @@ pub struct WriteResult {
     pub session_id: String,
     pub bytes_written: usize,
     pub tx_bytes: u64,
+    pub timestamp_wall_ms: u128,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub enum SignalLine {
+    Dtr,
+    Rts,
+}
+
+#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct SetLineSignalRequest {
+    pub session_id: String,
+    pub enabled: bool,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct SetLineSignalResult {
+    pub session_id: String,
+    pub signal: SignalLine,
+    pub enabled: bool,
     pub timestamp_wall_ms: u128,
 }
 
@@ -239,6 +264,24 @@ impl SerialPortHandle for RealSerialPortHandle {
             }),
         }
     }
+
+    fn set_data_terminal_ready(&mut self, enabled: bool) -> Result<(), SerialError> {
+        self.port
+            .write_data_terminal_ready(enabled)
+            .map_err(|source| SerialError::ControlSignal {
+                signal: SignalLine::Dtr,
+                message: source.to_string(),
+            })
+    }
+
+    fn set_request_to_send(&mut self, enabled: bool) -> Result<(), SerialError> {
+        self.port
+            .write_request_to_send(enabled)
+            .map_err(|source| SerialError::ControlSignal {
+                signal: SignalLine::Rts,
+                message: source.to_string(),
+            })
+    }
 }
 
 #[cfg(test)]
@@ -247,6 +290,7 @@ struct MockSerialBackend {
     ports: Vec<SerialPortSummary>,
     fail_open: bool,
     scripted_rx: Vec<Vec<u8>>,
+    line_events: std::sync::Arc<std::sync::Mutex<Vec<(SignalLine, bool)>>>,
 }
 
 #[cfg(test)]
@@ -256,6 +300,7 @@ impl MockSerialBackend {
             ports,
             fail_open: false,
             scripted_rx: Vec::new(),
+            line_events: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
         }
     }
 
@@ -264,6 +309,7 @@ impl MockSerialBackend {
             ports,
             fail_open: true,
             scripted_rx: Vec::new(),
+            line_events: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
         }
     }
 
@@ -272,7 +318,15 @@ impl MockSerialBackend {
             ports,
             fail_open: false,
             scripted_rx,
+            line_events: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
         }
+    }
+
+    fn line_events(&self) -> Vec<(SignalLine, bool)> {
+        self.line_events
+            .lock()
+            .expect("line events lock should not be poisoned")
+            .clone()
     }
 }
 
@@ -293,6 +347,7 @@ impl SerialBackend for MockSerialBackend {
         Ok(Box::new(MockSerialPortHandle {
             scripted_rx: VecDeque::from(self.scripted_rx.clone()),
             written: Vec::new(),
+            line_events: self.line_events.clone(),
         }))
     }
 }
@@ -302,6 +357,7 @@ impl SerialBackend for MockSerialBackend {
 struct MockSerialPortHandle {
     written: Vec<u8>,
     scripted_rx: VecDeque<Vec<u8>>,
+    line_events: std::sync::Arc<std::sync::Mutex<Vec<(SignalLine, bool)>>>,
 }
 
 #[cfg(test)]
@@ -326,6 +382,22 @@ impl SerialPortHandle for MockSerialPortHandle {
 
         Ok(bytes_read)
     }
+
+    fn set_data_terminal_ready(&mut self, enabled: bool) -> Result<(), SerialError> {
+        self.line_events
+            .lock()
+            .expect("line events lock should not be poisoned")
+            .push((SignalLine::Dtr, enabled));
+        Ok(())
+    }
+
+    fn set_request_to_send(&mut self, enabled: bool) -> Result<(), SerialError> {
+        self.line_events
+            .lock()
+            .expect("line events lock should not be poisoned")
+            .push((SignalLine::Rts, enabled));
+        Ok(())
+    }
 }
 
 #[derive(Debug)]
@@ -348,6 +420,10 @@ pub enum SerialError {
         message: String,
     },
     Read {
+        message: String,
+    },
+    ControlSignal {
+        signal: SignalLine,
         message: String,
     },
     InvalidConfig {
@@ -390,6 +466,9 @@ impl fmt::Display for SerialError {
             }
             SerialError::Read { message } => {
                 write!(formatter, "serial read failed: {message}")
+            }
+            SerialError::ControlSignal { signal, message } => {
+                write!(formatter, "serial {signal:?} control failed: {message}")
             }
             SerialError::InvalidConfig { field, message } => {
                 write!(formatter, "invalid serial config `{field}`: {message}")
@@ -882,6 +961,20 @@ impl<B: SerialBackend> SessionManager<B> {
         })
     }
 
+    pub fn set_dtr(
+        &mut self,
+        request: SetLineSignalRequest,
+    ) -> Result<SetLineSignalResult, SerialError> {
+        self.set_line_signal(request, SignalLine::Dtr)
+    }
+
+    pub fn set_rts(
+        &mut self,
+        request: SetLineSignalRequest,
+    ) -> Result<SetLineSignalResult, SerialError> {
+        self.set_line_signal(request, SignalLine::Rts)
+    }
+
     pub fn poll_rx_once(&mut self, session_id: &str) -> Result<Option<RxChunk>, SerialError> {
         let session =
             self.sessions
@@ -999,6 +1092,45 @@ impl<B: SerialBackend> SessionManager<B> {
         let session_id = format!("session-{}", self.next_session_number);
         self.next_session_number += 1;
         session_id
+    }
+
+    fn set_line_signal(
+        &mut self,
+        request: SetLineSignalRequest,
+        signal: SignalLine,
+    ) -> Result<SetLineSignalResult, SerialError> {
+        let session = self.sessions.get_mut(&request.session_id).ok_or_else(|| {
+            SerialError::SessionNotFound {
+                session_id: request.session_id.clone(),
+            }
+        })?;
+
+        if session.state != SessionState::Connected {
+            return Err(SerialError::SessionNotConnected {
+                session_id: request.session_id,
+                state: session.state,
+            });
+        }
+
+        let port = session
+            .port
+            .as_mut()
+            .ok_or_else(|| SerialError::SessionNotConnected {
+                session_id: request.session_id.clone(),
+                state: session.state,
+            })?;
+
+        match signal {
+            SignalLine::Dtr => port.set_data_terminal_ready(request.enabled)?,
+            SignalLine::Rts => port.set_request_to_send(request.enabled)?,
+        }
+
+        Ok(SetLineSignalResult {
+            session_id: request.session_id,
+            signal,
+            enabled: request.enabled,
+            timestamp_wall_ms: timestamp_wall_ms(),
+        })
     }
 }
 
@@ -1317,6 +1449,64 @@ mod tests {
                 bytes: vec![0x41],
             })
             .expect_err("closed session write should fail");
+
+        assert!(matches!(error, SerialError::SessionNotConnected { .. }));
+    }
+
+    #[test]
+    fn session_manager_sets_manual_dtr_and_rts_lines() {
+        let backend = MockSerialBackend::new(vec![mock_port("/dev/ttyUSB0", "Adapter A")]);
+        let event_log = backend.clone();
+        let mut manager = SessionManager::new(backend);
+        let opened = manager
+            .open_session(OpenSessionRequest {
+                config: valid_config_input("/dev/ttyUSB0"),
+            })
+            .expect("session should open");
+
+        let dtr = manager
+            .set_dtr(SetLineSignalRequest {
+                session_id: opened.session_id.clone(),
+                enabled: true,
+            })
+            .expect("DTR update should pass");
+        let rts = manager
+            .set_rts(SetLineSignalRequest {
+                session_id: opened.session_id,
+                enabled: false,
+            })
+            .expect("RTS update should pass");
+
+        assert_eq!(dtr.signal, SignalLine::Dtr);
+        assert!(dtr.enabled);
+        assert!(dtr.timestamp_wall_ms > 0);
+        assert_eq!(rts.signal, SignalLine::Rts);
+        assert!(!rts.enabled);
+        assert_eq!(
+            event_log.line_events(),
+            vec![(SignalLine::Dtr, true), (SignalLine::Rts, false)]
+        );
+    }
+
+    #[test]
+    fn session_manager_rejects_signal_update_to_closed_session() {
+        let mut manager = SessionManager::new(MockSerialBackend::new(vec![mock_port(
+            "/dev/ttyUSB0",
+            "Adapter A",
+        )]));
+        let opened = manager
+            .open_session(OpenSessionRequest {
+                config: valid_config_input("/dev/ttyUSB0"),
+            })
+            .expect("session should open");
+        manager.close_session(&opened.session_id).unwrap();
+
+        let error = manager
+            .set_dtr(SetLineSignalRequest {
+                session_id: opened.session_id,
+                enabled: true,
+            })
+            .expect_err("closed session DTR update should fail");
 
         assert!(matches!(error, SerialError::SessionNotConnected { .. }));
     }
