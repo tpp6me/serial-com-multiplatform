@@ -282,7 +282,7 @@ Goal: reliable single-session serial I/O and lifecycle.
 - [x] `SER-062` Return byte count on success. Completed 2026-05-28.
 - [x] `SER-063` Return structured error on write failure. Completed 2026-05-28.
 - [x] `SER-064` Handle port disappearing mid-write. Completed 2026-05-28 at write-error surface level; Hot-unplug transition remains under hotplug work.
-- [ ] `SER-065` Log partial TX marker when appropriate.
+- [x] `SER-065` Log partial TX marker when appropriate. Completed 2026-05-28.
 - [x] `SER-066` Maintain authoritative TX byte counter. Completed 2026-05-28.
 - [x] `SER-067` Add TX unit and integration tests. Completed 2026-05-28 for mock backend.
 
@@ -323,8 +323,8 @@ Goal: byte-accurate logging with explicit failure behavior.
 
 ### 4.2 Log Start/Stop
 
-- [ ] `LOG-010` Implement auto-log-on-connect option.
-- [ ] `LOG-011` Ensure auto-log starts before first byte is received.
+- [x] `LOG-010` Implement auto-log-on-connect option. Completed 2026-05-28 through optional open-session auto-log request.
+- [x] `LOG-011` Ensure auto-log starts before first byte is received. Completed 2026-05-28 by starting the log worker before the RX worker.
 - [x] `LOG-012` Implement manual start without disconnect. Completed 2026-05-28.
 - [x] `LOG-013` Implement manual stop without disconnect. Completed 2026-05-28.
 - [x] `LOG-014` Implement append mode. Completed 2026-05-28.
@@ -339,7 +339,7 @@ Goal: byte-accurate logging with explicit failure behavior.
 - [x] `LOG-022` Implement raw binary log format. Completed 2026-05-28.
 - [x] `LOG-023` Write session metadata header. Completed 2026-05-28.
 - [x] `LOG-024` Prefix RX in timestamped logs if LOG-10 remains in scope. Completed 2026-05-28.
-- [ ] `LOG-025` Prefix TX in timestamped logs if LOG-10 remains in scope.
+- [x] `LOG-025` Prefix TX in timestamped logs if LOG-10 remains in scope. Completed 2026-05-28.
 - [x] `LOG-026` Preserve raw bytes in binary logs. Completed 2026-05-28.
 - [x] `LOG-027` Include segment byte count or CRC for binary logs. Completed 2026-05-28 with segment byte counts.
 
@@ -359,13 +359,13 @@ Goal: byte-accurate logging with explicit failure behavior.
 - [ ] `LOG-040` Handle disk full.
 - [ ] `LOG-041` Handle log path unavailable.
 - [ ] `LOG-042` Handle permission denied after logging starts.
-- [ ] `LOG-043` Pause logging on unrecoverable write error.
-- [ ] `LOG-044` Keep serial session connected after logging failure.
-- [ ] `LOG-045` Show persistent error status to UI.
+- [x] `LOG-043` Pause logging on unrecoverable write error. Completed 2026-05-28.
+- [x] `LOG-044` Keep serial session connected after logging failure. Completed 2026-05-28.
+- [x] `LOG-045` Show persistent error status to UI. Completed 2026-05-28 through `serial_log_status`.
 - [ ] `LOG-046` Allow choose-new-path recovery.
 - [x] `LOG-047` Allow stop-logging recovery. Completed 2026-05-28.
 - [x] `LOG-048` Increment overrun counter when logger falls behind. Completed 2026-05-28.
-- [ ] `LOG-049` Add failure-mode tests.
+- [~] `LOG-049` Add failure-mode tests. Partial 2026-05-28: simulated unrecoverable log error keeps session connected and exposes persistent error status.
 
 ### 4.6 Phase 3 Exit Gate
 
@@ -827,18 +827,18 @@ Use this section to record completion of repeatable self-tests. Keep detailed lo
 
 ### 11.4 Logging Self-Test
 
-- [ ] `TEST-LOG-001` Auto-log starts before first byte.
-- [ ] `TEST-LOG-002` Manual start/stop works without disconnect.
+- [~] `TEST-LOG-001` Auto-log starts before first byte. Backend command ordering implemented 2026-05-28; UI/self-test procedure still open.
+- [x] `TEST-LOG-002` Manual start/stop works without disconnect. Covered by Rust unit tests 2026-05-28.
 - [ ] `TEST-LOG-003` Metadata header is correct.
 - [ ] `TEST-LOG-004` Plain text log format passes.
-- [ ] `TEST-LOG-005` Timestamped text log format passes.
+- [x] `TEST-LOG-005` Timestamped text log format passes. Covered by Rust unit tests 2026-05-28.
 - [ ] `TEST-LOG-006` Binary log format passes.
 - [ ] `TEST-LOG-007` Rotation by size passes.
 - [ ] `TEST-LOG-008` Rotation by time passes.
 - [ ] `TEST-LOG-009` Disk full behavior passes.
 - [ ] `TEST-LOG-010` Unavailable path behavior passes.
 - [ ] `TEST-LOG-011` Slow logger overrun behavior passes.
-- [ ] `TEST-LOG-012` Serial session survives log failure.
+- [x] `TEST-LOG-012` Serial session survives log failure. Covered by Rust unit tests 2026-05-28.
 
 ### 11.5 Terminal Renderer Self-Test
 

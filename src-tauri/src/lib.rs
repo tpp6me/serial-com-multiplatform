@@ -3,7 +3,9 @@ mod logging;
 mod serial;
 
 use config::{load_or_create_config, AppConfig, ConfigLoadResult};
-use logging::{LogFormat, LogStatus, LogWriter, StartLogRequest, StopLogRequest, StopLogResult};
+use logging::{
+    AutoLogRequest, LogFormat, LogStatus, LogWriter, StartLogRequest, StopLogRequest, StopLogResult,
+};
 use serde::Serialize;
 use serial::{
     apply_config_to_builder, list_ports_with, transition, validate_serial_config,
@@ -104,11 +106,24 @@ fn open_serial_session(
     manager: tauri::State<'_, AppSessionManager>,
     request: OpenSessionRequest,
 ) -> Result<OpenSessionResult, String> {
+    let auto_log = request.auto_log.clone();
     let result = manager
         .lock()
         .map_err(|_| "serial session manager lock poisoned".to_string())?
         .open_session(request)
         .map_err(|error| error.to_string())?;
+
+    if let Some(auto_log) = auto_log {
+        if let Err(error) =
+            start_log_for_session(manager.inner().clone(), result.session_id.clone(), auto_log)
+        {
+            let _ = manager
+                .lock()
+                .map_err(|_| "serial session manager lock poisoned".to_string())?
+                .close_session(&result.session_id);
+            return Err(error);
+        }
+    }
 
     start_serial_rx_worker(manager.inner().clone(), app, result.session_id.clone())?;
 
@@ -226,6 +241,22 @@ fn serial_start_log(
     manager: tauri::State<'_, AppSessionManager>,
     request: StartLogRequest,
 ) -> Result<LogStatus, String> {
+    start_log_for_session(
+        manager.inner().clone(),
+        request.session_id,
+        AutoLogRequest {
+            path: request.path,
+            format: request.format,
+            append: request.append,
+        },
+    )
+}
+
+fn start_log_for_session(
+    manager: AppSessionManager,
+    session_id: String,
+    request: AutoLogRequest,
+) -> Result<LogStatus, String> {
     let format = LogFormat::try_from(request.format.as_str()).map_err(|error| error.to_string())?;
     let path = PathBuf::from(&request.path);
     let metadata = {
@@ -233,7 +264,7 @@ fn serial_start_log(
             .lock()
             .map_err(|_| "serial session manager lock poisoned".to_string())?;
         let status = manager
-            .log_status(&request.session_id)
+            .log_status(&session_id)
             .map_err(|error| error.to_string())?;
 
         if status.active {
@@ -241,7 +272,7 @@ fn serial_start_log(
         }
 
         manager
-            .log_metadata(&request.session_id)
+            .log_metadata(&session_id)
             .map_err(|error| error.to_string())?
     };
     let writer = LogWriter::open(&path, format, request.append, &metadata)
@@ -250,10 +281,10 @@ fn serial_start_log(
     let status = manager
         .lock()
         .map_err(|_| "serial session manager lock poisoned".to_string())?
-        .start_log(&request.session_id, request.path, format, current_size)
+        .start_log(&session_id, request.path, format, current_size)
         .map_err(|error| error.to_string())?;
 
-    start_serial_log_worker(manager.inner().clone(), request.session_id, writer)?;
+    start_serial_log_worker(manager, session_id, writer)?;
 
     Ok(status)
 }

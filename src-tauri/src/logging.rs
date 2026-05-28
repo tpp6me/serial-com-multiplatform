@@ -33,6 +33,14 @@ pub struct StartLogRequest {
 
 #[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
+pub struct AutoLogRequest {
+    pub path: String,
+    pub format: String,
+    pub append: bool,
+}
+
+#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
 pub struct StopLogRequest {
     pub session_id: String,
 }
@@ -124,6 +132,22 @@ impl LogRecord {
             direction: LogDirection::Rx,
             timestamp_wall_ms,
             bytes,
+        }
+    }
+
+    pub fn tx(timestamp_wall_ms: u128, bytes: Vec<u8>) -> Self {
+        Self {
+            direction: LogDirection::Tx,
+            timestamp_wall_ms,
+            bytes,
+        }
+    }
+
+    pub fn marker(timestamp_wall_ms: u128, message: impl Into<String>) -> Self {
+        Self {
+            direction: LogDirection::Marker,
+            timestamp_wall_ms,
+            bytes: message.into().into_bytes(),
         }
     }
 
@@ -349,6 +373,14 @@ mod tests {
         let encoded = encode_record(LogFormat::TimestampedText, &record);
 
         assert_eq!(encoded, b"[123] RX A\\r\\n\\x00\\xFF\n");
+    }
+
+    #[test]
+    fn timestamped_text_prefixes_tx_records() {
+        let record = LogRecord::tx(456, vec![b'O', b'K']);
+        let encoded = encode_record(LogFormat::TimestampedText, &record);
+
+        assert_eq!(encoded, b"[456] TX OK\n");
     }
 
     #[test]

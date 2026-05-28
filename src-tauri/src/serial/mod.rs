@@ -1,5 +1,6 @@
 use crate::logging::{
-    LogFormat, LogMetadata, LogRecord, LogStatus, StopLogResult, LOG_QUEUE_CAPACITY_BYTES,
+    AutoLogRequest, LogFormat, LogMetadata, LogRecord, LogStatus, StopLogResult,
+    LOG_QUEUE_CAPACITY_BYTES,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, VecDeque};
@@ -90,6 +91,8 @@ pub enum SessionEvent {
 #[serde(rename_all = "camelCase")]
 pub struct OpenSessionRequest {
     pub config: SerialConfigInput,
+    #[serde(default)]
+    pub auto_log: Option<AutoLogRequest>,
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
@@ -307,6 +310,7 @@ impl SerialPortHandle for RealSerialPortHandle {
 struct MockSerialBackend {
     ports: Vec<SerialPortSummary>,
     fail_open: bool,
+    max_write_len: Option<usize>,
     scripted_rx: Vec<Vec<u8>>,
     line_events: std::sync::Arc<std::sync::Mutex<Vec<(SignalLine, bool)>>>,
 }
@@ -317,6 +321,7 @@ impl MockSerialBackend {
         Self {
             ports,
             fail_open: false,
+            max_write_len: None,
             scripted_rx: Vec::new(),
             line_events: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
         }
@@ -326,6 +331,7 @@ impl MockSerialBackend {
         Self {
             ports,
             fail_open: true,
+            max_write_len: None,
             scripted_rx: Vec::new(),
             line_events: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
         }
@@ -335,7 +341,18 @@ impl MockSerialBackend {
         Self {
             ports,
             fail_open: false,
+            max_write_len: None,
             scripted_rx,
+            line_events: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
+        }
+    }
+
+    fn with_partial_write(ports: Vec<SerialPortSummary>, max_write_len: usize) -> Self {
+        Self {
+            ports,
+            fail_open: false,
+            max_write_len: Some(max_write_len),
+            scripted_rx: Vec::new(),
             line_events: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
         }
     }
@@ -365,6 +382,7 @@ impl SerialBackend for MockSerialBackend {
         Ok(Box::new(MockSerialPortHandle {
             scripted_rx: VecDeque::from(self.scripted_rx.clone()),
             written: Vec::new(),
+            max_write_len: self.max_write_len,
             line_events: self.line_events.clone(),
         }))
     }
@@ -374,6 +392,7 @@ impl SerialBackend for MockSerialBackend {
 #[derive(Debug, Default)]
 struct MockSerialPortHandle {
     written: Vec<u8>,
+    max_write_len: Option<usize>,
     scripted_rx: VecDeque<Vec<u8>>,
     line_events: std::sync::Arc<std::sync::Mutex<Vec<(SignalLine, bool)>>>,
 }
@@ -381,8 +400,9 @@ struct MockSerialPortHandle {
 #[cfg(test)]
 impl SerialPortHandle for MockSerialPortHandle {
     fn write_bytes(&mut self, bytes: &[u8]) -> Result<usize, SerialError> {
-        self.written.extend_from_slice(bytes);
-        Ok(bytes.len())
+        let bytes_written = self.max_write_len.unwrap_or(bytes.len()).min(bytes.len());
+        self.written.extend_from_slice(&bytes[..bytes_written]);
+        Ok(bytes_written)
     }
 
     fn read_available(&mut self, buffer: &mut [u8]) -> Result<usize, SerialError> {
@@ -971,6 +991,24 @@ impl<B: SerialBackend> SessionManager<B> {
         let timestamp_wall_ms = timestamp_wall_ms();
         let bytes_written = port.write_bytes(&request.bytes)?;
         session.tx_bytes += bytes_written as u64;
+        if bytes_written > 0 {
+            push_log_record(
+                session,
+                LogRecord::tx(timestamp_wall_ms, request.bytes[..bytes_written].to_vec()),
+            );
+        }
+        if bytes_written < request.bytes.len() {
+            push_log_record(
+                session,
+                LogRecord::marker(
+                    timestamp_wall_ms,
+                    format!(
+                        "partial TX: requested {} bytes, wrote {bytes_written} bytes",
+                        request.bytes.len()
+                    ),
+                ),
+            );
+        }
 
         Ok(WriteResult {
             session_id: request.session_id,
@@ -1555,6 +1593,23 @@ mod tests {
     }
 
     #[test]
+    fn open_session_request_deserializes_without_auto_log() {
+        let request: OpenSessionRequest = serde_json::from_value(serde_json::json!({
+            "config": {
+                "portPath": "/dev/ttyUSB0",
+                "baudRate": 115200,
+                "dataBits": 8,
+                "parity": "none",
+                "stopBits": 1,
+                "flowControl": "none"
+            }
+        }))
+        .expect("autoLog should be optional");
+
+        assert!(request.auto_log.is_none());
+    }
+
+    #[test]
     fn session_state_transitions_cover_documented_core_flow() {
         let state = transition(SessionState::Disconnected, SessionEvent::ConnectRequested).unwrap();
         let state = transition(state, SessionEvent::ConnectSucceeded).unwrap();
@@ -1620,6 +1675,7 @@ mod tests {
         let opened = manager
             .open_session(OpenSessionRequest {
                 config: valid_config_input("/dev/ttyUSB0"),
+                auto_log: None,
             })
             .expect("session should open");
 
@@ -1646,6 +1702,7 @@ mod tests {
         let error = manager
             .open_session(OpenSessionRequest {
                 config: valid_config_input("/dev/ttyUSB0"),
+                auto_log: None,
             })
             .expect_err("mock driver should reject open");
 
@@ -1661,6 +1718,7 @@ mod tests {
         let opened = manager
             .open_session(OpenSessionRequest {
                 config: valid_config_input("/dev/ttyUSB0"),
+                auto_log: None,
             })
             .expect("session should open");
 
@@ -1684,6 +1742,79 @@ mod tests {
     }
 
     #[test]
+    fn session_manager_queues_tx_records_for_active_log() {
+        let mut manager = SessionManager::new(MockSerialBackend::new(vec![mock_port(
+            "/dev/ttyUSB0",
+            "Adapter A",
+        )]));
+        let opened = manager
+            .open_session(OpenSessionRequest {
+                config: valid_config_input("/dev/ttyUSB0"),
+                auto_log: None,
+            })
+            .expect("session should open");
+        manager
+            .start_log(
+                &opened.session_id,
+                ".dev-data/test.log".to_string(),
+                LogFormat::TimestampedText,
+                0,
+            )
+            .expect("log should start");
+
+        manager
+            .write(WriteRequest {
+                session_id: opened.session_id.clone(),
+                bytes: vec![0x41, 0x54],
+            })
+            .expect("write should pass");
+        let records = manager.drain_log_records(&opened.session_id).unwrap();
+
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].direction, crate::logging::LogDirection::Tx);
+        assert_eq!(records[0].bytes, vec![0x41, 0x54]);
+    }
+
+    #[test]
+    fn session_manager_logs_partial_tx_marker_when_driver_short_writes() {
+        let mut manager = SessionManager::new(MockSerialBackend::with_partial_write(
+            vec![mock_port("/dev/ttyUSB0", "Adapter A")],
+            2,
+        ));
+        let opened = manager
+            .open_session(OpenSessionRequest {
+                config: valid_config_input("/dev/ttyUSB0"),
+                auto_log: None,
+            })
+            .expect("session should open");
+        manager
+            .start_log(
+                &opened.session_id,
+                ".dev-data/test.log".to_string(),
+                LogFormat::TimestampedText,
+                0,
+            )
+            .expect("log should start");
+
+        let result = manager
+            .write(WriteRequest {
+                session_id: opened.session_id.clone(),
+                bytes: vec![0x41, 0x42, 0x43],
+            })
+            .expect("short write should surface as partial success");
+        let records = manager.drain_log_records(&opened.session_id).unwrap();
+
+        assert_eq!(result.bytes_written, 2);
+        assert_eq!(records.len(), 2);
+        assert_eq!(records[0].direction, crate::logging::LogDirection::Tx);
+        assert_eq!(records[0].bytes, vec![0x41, 0x42]);
+        assert_eq!(records[1].direction, crate::logging::LogDirection::Marker);
+        assert!(String::from_utf8(records[1].bytes.clone())
+            .unwrap()
+            .contains("partial TX: requested 3 bytes, wrote 2 bytes"));
+    }
+
+    #[test]
     fn session_manager_rejects_write_to_closed_session() {
         let mut manager = SessionManager::new(MockSerialBackend::new(vec![mock_port(
             "/dev/ttyUSB0",
@@ -1692,6 +1823,7 @@ mod tests {
         let opened = manager
             .open_session(OpenSessionRequest {
                 config: valid_config_input("/dev/ttyUSB0"),
+                auto_log: None,
             })
             .expect("session should open");
         manager.close_session(&opened.session_id).unwrap();
@@ -1714,6 +1846,7 @@ mod tests {
         let opened = manager
             .open_session(OpenSessionRequest {
                 config: valid_config_input("/dev/ttyUSB0"),
+                auto_log: None,
             })
             .expect("session should open");
 
@@ -1750,6 +1883,7 @@ mod tests {
         let opened = manager
             .open_session(OpenSessionRequest {
                 config: valid_config_input("/dev/ttyUSB0"),
+                auto_log: None,
             })
             .expect("session should open");
         manager.close_session(&opened.session_id).unwrap();
@@ -1771,6 +1905,7 @@ mod tests {
         let opened = manager
             .open_session(OpenSessionRequest {
                 config: valid_config_input("/dev/ttyUSB0"),
+                auto_log: None,
             })
             .expect("session should open");
 
@@ -1799,6 +1934,7 @@ mod tests {
         let opened = manager
             .open_session(OpenSessionRequest {
                 config: valid_config_input("/dev/ttyUSB0"),
+                auto_log: None,
             })
             .expect("session should open");
 
@@ -1818,6 +1954,7 @@ mod tests {
         let opened = manager
             .open_session(OpenSessionRequest {
                 config: valid_config_input("/dev/ttyUSB0"),
+                auto_log: None,
             })
             .expect("session should open");
 
@@ -1843,6 +1980,7 @@ mod tests {
         let opened = manager
             .open_session(OpenSessionRequest {
                 config: valid_config_input("/dev/ttyUSB0"),
+                auto_log: None,
             })
             .expect("session should open");
 
@@ -1878,6 +2016,7 @@ mod tests {
         let opened = manager
             .open_session(OpenSessionRequest {
                 config: valid_config_input("/dev/ttyUSB0"),
+                auto_log: None,
             })
             .expect("session should open");
 
@@ -1902,6 +2041,7 @@ mod tests {
         let opened = manager
             .open_session(OpenSessionRequest {
                 config: valid_config_input("/dev/ttyUSB0"),
+                auto_log: None,
             })
             .expect("session should open");
 
@@ -1930,6 +2070,7 @@ mod tests {
         let opened = manager
             .open_session(OpenSessionRequest {
                 config: valid_config_input("/dev/ttyUSB0"),
+                auto_log: None,
             })
             .expect("session should open");
 
@@ -1970,6 +2111,7 @@ mod tests {
         let opened = manager
             .open_session(OpenSessionRequest {
                 config: valid_config_input("/dev/ttyUSB0"),
+                auto_log: None,
             })
             .expect("session should open");
         manager
@@ -2010,6 +2152,7 @@ mod tests {
         let opened = manager
             .open_session(OpenSessionRequest {
                 config: valid_config_input("/dev/ttyUSB0"),
+                auto_log: None,
             })
             .expect("session should open");
 
@@ -2032,6 +2175,44 @@ mod tests {
     }
 
     #[test]
+    fn session_manager_log_error_pauses_logging_and_keeps_session_connected() {
+        let mut manager = SessionManager::new(MockSerialBackend::with_rx(
+            vec![mock_port("/dev/ttyUSB0", "Adapter A")],
+            vec![vec![0x41]],
+        ));
+        let opened = manager
+            .open_session(OpenSessionRequest {
+                config: valid_config_input("/dev/ttyUSB0"),
+                auto_log: None,
+            })
+            .expect("session should open");
+        manager
+            .start_log(
+                &opened.session_id,
+                ".dev-data/test.log".to_string(),
+                LogFormat::Binary,
+                0,
+            )
+            .expect("log should start");
+
+        manager
+            .mark_log_error(&opened.session_id, "disk full".to_string())
+            .expect("log error should mark status");
+        poll_all_rx(&mut manager, &opened.session_id);
+        let status = manager.log_status(&opened.session_id).unwrap();
+        let records = manager.drain_log_records(&opened.session_id).unwrap();
+
+        assert_eq!(
+            manager.state(&opened.session_id).unwrap(),
+            SessionState::Connected
+        );
+        assert!(!status.active);
+        assert_eq!(status.error.as_deref(), Some("disk full"));
+        assert_eq!(status.rx_bytes, 1);
+        assert!(records.is_empty());
+    }
+
+    #[test]
     fn session_manager_mock_gate_connect_receive_transmit_disconnect_and_reconnect() {
         let mut manager = SessionManager::new(MockSerialBackend::with_rx(
             vec![mock_port("/dev/ttyUSB0", "Adapter A")],
@@ -2040,6 +2221,7 @@ mod tests {
         let opened = manager
             .open_session(OpenSessionRequest {
                 config: valid_config_input("/dev/ttyUSB0"),
+                auto_log: None,
             })
             .expect("session should open");
 
