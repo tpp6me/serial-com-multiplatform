@@ -1,0 +1,25 @@
+# Dependencies
+node_modules/
+.pnpm-store/
+
+# Build output
+dist/
+target/
+src-tauri/target/
+src-tauri/gen/
+
+# Local environment and generated app data
+.env.local
+.env.*.local
+.dev-data/
+
+# Test artifacts
+coverage/
+test-results/
+playwright-report/
+
+# OS/editor noise
+.DS_Store
+.idea/
+.vscode/
+*.swp

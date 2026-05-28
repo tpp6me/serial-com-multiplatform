@@ -1,0 +1,152 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://multiserial.dev/schemas/config.schema.json",
+  "title": "MultiSerial Configuration",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schemaVersion",
+    "connection",
+    "display",
+    "logging",
+    "send",
+    "filters",
+    "updates",
+    "telemetry"
+  ],
+  "properties": {
+    "schemaVersion": {
+      "type": "integer",
+      "const": 1
+    },
+    "connection": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "defaultBaudRate",
+        "defaultDataBits",
+        "defaultParity",
+        "defaultStopBits",
+        "defaultFlowControl",
+        "autoConnectOnLaunch",
+        "rememberPerDevice",
+        "reconnectOnHotplug",
+        "reconnectMaxRetries",
+        "reconnectBackoffMs"
+      ],
+      "properties": {
+        "defaultBaudRate": { "type": "integer", "minimum": 1 },
+        "defaultDataBits": { "type": "integer", "enum": [5, 6, 7, 8] },
+        "defaultParity": { "type": "string", "enum": ["none", "even", "odd", "mark", "space"] },
+        "defaultStopBits": { "type": "number", "enum": [1, 1.5, 2] },
+        "defaultFlowControl": { "type": "string", "enum": ["none", "rtsCts", "xonXoff", "dtrDsr"] },
+        "autoConnectOnLaunch": { "type": "boolean" },
+        "rememberPerDevice": { "type": "boolean" },
+        "reconnectOnHotplug": { "type": "boolean" },
+        "reconnectMaxRetries": { "type": "integer", "minimum": 0, "maximum": 100 },
+        "reconnectBackoffMs": { "type": "integer", "minimum": 100, "maximum": 60000 }
+      }
+    },
+    "display": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "viewMode",
+        "fontFamily",
+        "fontSize",
+        "theme",
+        "timestampEnabled",
+        "timestampFormat",
+        "scrollbackLines",
+        "lineWrap",
+        "newlineMode",
+        "partialLineTimeoutMs"
+      ],
+      "properties": {
+        "viewMode": { "type": "string", "enum": ["ascii", "hex", "mixed", "decimal", "binary"] },
+        "fontFamily": { "type": "string", "minLength": 1 },
+        "fontSize": { "type": "integer", "minimum": 8, "maximum": 48 },
+        "theme": { "type": "string", "enum": ["system", "light", "dark"] },
+        "timestampEnabled": { "type": "boolean" },
+        "timestampFormat": { "type": "string", "minLength": 1 },
+        "scrollbackLines": { "type": "integer", "minimum": 1000, "maximum": 1000000 },
+        "lineWrap": { "type": "boolean" },
+        "newlineMode": { "type": "string", "enum": ["cr", "lf", "crlf", "raw"] },
+        "partialLineTimeoutMs": { "type": "integer", "minimum": 0, "maximum": 60000 }
+      }
+    },
+    "logging": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "autoLogOnConnect",
+        "logDirectory",
+        "filenameTemplate",
+        "logFormat",
+        "appendMode",
+        "rotationSizeMB",
+        "rotationPeriod",
+        "maxFilesToKeep"
+      ],
+      "properties": {
+        "autoLogOnConnect": { "type": "boolean" },
+        "logDirectory": { "type": "string", "minLength": 1 },
+        "filenameTemplate": { "type": "string", "minLength": 1 },
+        "logFormat": { "type": "string", "enum": ["plain-text", "timestamped-text", "raw-binary"] },
+        "appendMode": { "type": "boolean" },
+        "rotationSizeMB": { "type": "integer", "minimum": 1, "maximum": 10240 },
+        "rotationPeriod": { "type": "string", "enum": ["none", "hourly", "daily"] },
+        "maxFilesToKeep": { "type": "integer", "minimum": 1, "maximum": 10000 }
+      }
+    },
+    "send": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "defaultLineEnding",
+        "echoTx",
+        "historySize",
+        "fileSendChunkBytes",
+        "fileSendPacingMs",
+        "automationMaxSendsPerMinute",
+        "automationMinIntervalMs"
+      ],
+      "properties": {
+        "defaultLineEnding": { "type": "string", "enum": ["none", "cr", "lf", "crlf"] },
+        "echoTx": { "type": "boolean" },
+        "historySize": { "type": "integer", "minimum": 0, "maximum": 5000 },
+        "fileSendChunkBytes": { "type": "integer", "minimum": 1, "maximum": 1048576 },
+        "fileSendPacingMs": { "type": "integer", "minimum": 0, "maximum": 60000 },
+        "automationMaxSendsPerMinute": { "type": "integer", "minimum": 1, "maximum": 1000 },
+        "automationMinIntervalMs": { "type": "integer", "minimum": 50, "maximum": 60000 }
+      }
+    },
+    "filters": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["regexMaxLengthChars", "regexTimeoutMs"],
+      "properties": {
+        "regexMaxLengthChars": { "type": "integer", "minimum": 1, "maximum": 512 },
+        "regexTimeoutMs": { "type": "integer", "minimum": 1, "maximum": 1000 }
+      }
+    },
+    "updates": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["autoCheck", "autoDownload", "releaseChannel"],
+      "properties": {
+        "autoCheck": { "type": "boolean" },
+        "autoDownload": { "type": "boolean" },
+        "releaseChannel": { "type": "string", "enum": ["stable", "beta", "nightly"] }
+      }
+    },
+    "telemetry": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["crashReportingEnabled"],
+      "properties": {
+        "crashReportingEnabled": { "type": "boolean" }
+      }
+    }
+  }
+}

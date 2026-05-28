@@ -1,0 +1,21 @@
+[package]
+name = "multiSerial"
+version = "0.1.0"
+description = "MultiSerial desktop application"
+authors = ["MultiSerial Contributors"]
+license = "MIT"
+edition = "2021"
+rust-version = "1.89"
+
+[lib]
+name = "multi_serial_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+serialport = "4.7"
+tauri = { version = "2", features = [] }

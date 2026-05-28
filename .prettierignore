@@ -1,0 +1,7 @@
+MultiSerial_Implementation_Plan.md
+TODO.md
+pnpm-lock.yaml
+src-tauri/gen/
+src-tauri/target/
+node_modules/
+dist/
