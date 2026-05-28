@@ -5,11 +5,18 @@ use config::{load_or_create_config, AppConfig, ConfigLoadResult};
 use serde::Serialize;
 use serial::{
     apply_config_to_builder, list_ports_with, transition, validate_serial_config,
-    RealSerialBackend, SerialConfig, SerialConfigInput, SerialPortSummary, SessionEvent,
-    SessionState,
+    CloseSessionResult, OpenSessionRequest, OpenSessionResult, RealSerialBackend, RxBatch,
+    SerialConfig, SerialConfigInput, SerialPortSummary, SessionEvent, SessionManager, SessionState,
+    WriteRequest, WriteResult, RX_BATCH_INTERVAL_MS,
 };
 use std::env;
 use std::path::PathBuf;
+use std::sync::{Arc, Mutex};
+use std::thread;
+use std::time::{Duration, Instant};
+use tauri::Emitter;
+
+type AppSessionManager = Arc<Mutex<SessionManager<RealSerialBackend>>>;
 
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -87,6 +94,88 @@ fn next_session_state(state: SessionState, event: SessionEvent) -> Result<Sessio
     transition(state, event).map_err(|error| error.to_string())
 }
 
+#[tauri::command]
+fn open_serial_session(
+    app: tauri::AppHandle,
+    manager: tauri::State<'_, AppSessionManager>,
+    request: OpenSessionRequest,
+) -> Result<OpenSessionResult, String> {
+    let result = manager
+        .lock()
+        .map_err(|_| "serial session manager lock poisoned".to_string())?
+        .open_session(request)
+        .map_err(|error| error.to_string())?;
+
+    start_serial_rx_worker(manager.inner().clone(), app, result.session_id.clone())?;
+
+    Ok(result)
+}
+
+#[tauri::command]
+fn close_serial_session(
+    manager: tauri::State<'_, AppSessionManager>,
+    session_id: String,
+) -> Result<CloseSessionResult, String> {
+    manager
+        .lock()
+        .map_err(|_| "serial session manager lock poisoned".to_string())?
+        .close_session(&session_id)
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+fn serial_write(
+    manager: tauri::State<'_, AppSessionManager>,
+    request: WriteRequest,
+) -> Result<WriteResult, String> {
+    manager
+        .lock()
+        .map_err(|_| "serial session manager lock poisoned".to_string())?
+        .write(request)
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+fn serial_drain_rx(
+    app: tauri::AppHandle,
+    manager: tauri::State<'_, AppSessionManager>,
+    session_id: String,
+) -> Result<RxBatch, String> {
+    let batch = manager
+        .lock()
+        .map_err(|_| "serial session manager lock poisoned".to_string())?
+        .drain_rx(&session_id)
+        .map_err(|error| error.to_string())?;
+
+    emit_rx_batch(&app, &batch)?;
+    Ok(batch)
+}
+
+#[tauri::command]
+fn serial_session_state(
+    manager: tauri::State<'_, AppSessionManager>,
+    session_id: String,
+) -> Result<SessionState, String> {
+    manager
+        .lock()
+        .map_err(|_| "serial session manager lock poisoned".to_string())?
+        .state(&session_id)
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+fn serial_session_config(
+    manager: tauri::State<'_, AppSessionManager>,
+    session_id: String,
+) -> Result<SerialConfig, String> {
+    manager
+        .lock()
+        .map_err(|_| "serial session manager lock poisoned".to_string())?
+        .config(&session_id)
+        .cloned()
+        .map_err(|error| error.to_string())
+}
+
 fn env_path(key: &str, fallback: &str) -> String {
     env::var(key)
         .map(PathBuf::from)
@@ -101,8 +190,83 @@ fn config_dir() -> PathBuf {
         .unwrap_or_else(|_| PathBuf::from(".dev-data/config"))
 }
 
+fn start_serial_rx_worker(
+    manager: AppSessionManager,
+    app: tauri::AppHandle,
+    session_id: String,
+) -> Result<(), String> {
+    let should_start = manager
+        .lock()
+        .map_err(|_| "serial session manager lock poisoned".to_string())?
+        .mark_rx_worker_started(&session_id)
+        .map_err(|error| error.to_string())?;
+
+    if !should_start {
+        return Ok(());
+    }
+
+    thread::spawn(move || {
+        let mut last_emit = Instant::now();
+
+        loop {
+            let mut read_failed = false;
+            let mut batch_to_emit = None;
+
+            {
+                let Ok(mut manager) = manager.lock() else {
+                    break;
+                };
+
+                match manager.state(&session_id) {
+                    Ok(SessionState::Connected) => {}
+                    Ok(_) | Err(_) => break,
+                }
+
+                if manager.poll_rx_once(&session_id).is_err() {
+                    manager.mark_read_error(&session_id);
+                    read_failed = true;
+                }
+
+                if last_emit.elapsed() >= Duration::from_millis(RX_BATCH_INTERVAL_MS) {
+                    match manager.drain_rx(&session_id) {
+                        Ok(batch) => batch_to_emit = Some(batch),
+                        Err(_) => read_failed = true,
+                    }
+                    last_emit = Instant::now();
+                }
+            }
+
+            if let Some(batch) = batch_to_emit {
+                let _ = emit_rx_batch(&app, &batch);
+            }
+
+            if read_failed {
+                break;
+            }
+
+            thread::sleep(Duration::from_millis(2));
+        }
+
+        if let Ok(mut manager) = manager.lock() {
+            manager.mark_rx_worker_stopped(&session_id);
+        }
+    });
+
+    Ok(())
+}
+
+fn emit_rx_batch(app: &tauri::AppHandle, batch: &RxBatch) -> Result<(), String> {
+    if batch.chunks.is_empty() {
+        return Ok(());
+    }
+
+    app.emit("serial-rx-batch", batch)
+        .map_err(|error| error.to_string())
+}
+
 pub fn run() {
     tauri::Builder::default()
+        .manage(Arc::new(Mutex::new(SessionManager::new(RealSerialBackend))))
         .invoke_handler(tauri::generate_handler![
             environment_info,
             build_metadata,
@@ -111,7 +275,13 @@ pub fn run() {
             list_serial_ports,
             validate_serial_settings,
             validate_backend_serial_settings,
-            next_session_state
+            next_session_state,
+            open_serial_session,
+            close_serial_session,
+            serial_write,
+            serial_drain_rx,
+            serial_session_state,
+            serial_session_config
         ])
         .run(tauri::generate_context!())
         .expect("failed to run MultiSerial");

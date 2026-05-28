@@ -1,6 +1,13 @@
 use serde::{Deserialize, Serialize};
+use std::collections::{HashMap, VecDeque};
 use std::fmt;
+use std::io::{ErrorKind, Read, Write};
 use std::time::Duration;
+use std::time::{SystemTime, UNIX_EPOCH};
+
+pub const RX_BATCH_INTERVAL_MS: u64 = 16;
+const RX_QUEUE_CAPACITY_BYTES: usize = 1024 * 1024;
+const RX_READ_CHUNK_SIZE: usize = 4096;
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
@@ -17,6 +24,12 @@ pub struct SerialPortSummary {
 
 pub trait SerialBackend {
     fn list_ports(&self) -> Result<Vec<SerialPortSummary>, SerialError>;
+    fn open_port(&self, config: &SerialConfig) -> Result<Box<dyn SerialPortHandle>, SerialError>;
+}
+
+pub trait SerialPortHandle: Send {
+    fn write_bytes(&mut self, bytes: &[u8]) -> Result<usize, SerialError>;
+    fn read_available(&mut self, buffer: &mut [u8]) -> Result<usize, SerialError>;
 }
 
 #[derive(Debug, Clone, Deserialize, PartialEq)]
@@ -67,6 +80,83 @@ pub enum SessionEvent {
     RetryCancelled,
 }
 
+#[derive(Debug, Clone, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct OpenSessionRequest {
+    pub config: SerialConfigInput,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct OpenSessionResult {
+    pub session_id: String,
+    pub state: SessionState,
+    pub config: SerialConfig,
+}
+
+#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct WriteRequest {
+    pub session_id: String,
+    pub bytes: Vec<u8>,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct WriteResult {
+    pub session_id: String,
+    pub bytes_written: usize,
+    pub tx_bytes: u64,
+    pub timestamp_wall_ms: u128,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct RxChunk {
+    pub sequence: u64,
+    pub timestamp_wall_ms: u128,
+    pub bytes: Vec<u8>,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct RxBatch {
+    pub session_id: String,
+    pub chunks: Vec<RxChunk>,
+    pub rx_bytes: u64,
+    pub queued_bytes: usize,
+    pub dropped_rx_bytes: u64,
+    pub batch_interval_ms: u64,
+    pub drained_at_wall_ms: u128,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct CloseSessionResult {
+    pub session_id: String,
+    pub state: SessionState,
+}
+
+pub struct SessionManager<B: SerialBackend> {
+    backend: B,
+    sessions: HashMap<String, SerialSession>,
+    next_session_number: u64,
+}
+
+struct SerialSession {
+    config: SerialConfig,
+    state: SessionState,
+    port: Option<Box<dyn SerialPortHandle>>,
+    tx_bytes: u64,
+    rx_bytes: u64,
+    dropped_rx_bytes: u64,
+    next_rx_sequence: u64,
+    rx_queue_bytes: usize,
+    rx_queue_capacity_bytes: usize,
+    rx_queue: VecDeque<RxChunk>,
+    rx_worker_running: bool,
+}
+
 #[derive(Debug, Default)]
 pub struct RealSerialBackend;
 
@@ -78,18 +168,88 @@ impl SerialBackend for RealSerialBackend {
 
         Ok(ports.into_iter().map(SerialPortSummary::from).collect())
     }
+
+    fn open_port(&self, config: &SerialConfig) -> Result<Box<dyn SerialPortHandle>, SerialError> {
+        let port =
+            apply_config_to_builder(config)?
+                .open()
+                .map_err(|source| SerialError::OpenPort {
+                    port_path: config.port_path.clone(),
+                    message: source.to_string(),
+                })?;
+
+        Ok(Box::new(RealSerialPortHandle { port }))
+    }
+}
+
+struct RealSerialPortHandle {
+    port: Box<dyn serialport::SerialPort>,
+}
+
+impl SerialPortHandle for RealSerialPortHandle {
+    fn write_bytes(&mut self, bytes: &[u8]) -> Result<usize, SerialError> {
+        self.port.write(bytes).map_err(|source| SerialError::Write {
+            message: source.to_string(),
+        })
+    }
+
+    fn read_available(&mut self, buffer: &mut [u8]) -> Result<usize, SerialError> {
+        let available = self
+            .port
+            .bytes_to_read()
+            .map_err(|source| SerialError::Read {
+                message: source.to_string(),
+            })?;
+
+        if available == 0 || buffer.is_empty() {
+            return Ok(0);
+        }
+
+        let read_len = buffer.len().min(available as usize);
+        match self.port.read(&mut buffer[..read_len]) {
+            Ok(bytes_read) => Ok(bytes_read),
+            Err(source) if matches!(source.kind(), ErrorKind::TimedOut | ErrorKind::WouldBlock) => {
+                Ok(0)
+            }
+            Err(source) => Err(SerialError::Read {
+                message: source.to_string(),
+            }),
+        }
+    }
 }
 
 #[cfg(test)]
 #[derive(Debug, Clone)]
 struct MockSerialBackend {
     ports: Vec<SerialPortSummary>,
+    fail_open: bool,
+    scripted_rx: Vec<Vec<u8>>,
 }
 
 #[cfg(test)]
 impl MockSerialBackend {
     fn new(ports: Vec<SerialPortSummary>) -> Self {
-        Self { ports }
+        Self {
+            ports,
+            fail_open: false,
+            scripted_rx: Vec::new(),
+        }
+    }
+
+    fn failing_open(ports: Vec<SerialPortSummary>) -> Self {
+        Self {
+            ports,
+            fail_open: true,
+            scripted_rx: Vec::new(),
+        }
+    }
+
+    fn with_rx(ports: Vec<SerialPortSummary>, scripted_rx: Vec<Vec<u8>>) -> Self {
+        Self {
+            ports,
+            fail_open: false,
+            scripted_rx,
+        }
     }
 }
 
@@ -98,11 +258,73 @@ impl SerialBackend for MockSerialBackend {
     fn list_ports(&self) -> Result<Vec<SerialPortSummary>, SerialError> {
         Ok(self.ports.clone())
     }
+
+    fn open_port(&self, config: &SerialConfig) -> Result<Box<dyn SerialPortHandle>, SerialError> {
+        if self.fail_open {
+            return Err(SerialError::OpenPort {
+                port_path: config.port_path.clone(),
+                message: "mock driver rejected open".to_string(),
+            });
+        }
+
+        Ok(Box::new(MockSerialPortHandle {
+            scripted_rx: VecDeque::from(self.scripted_rx.clone()),
+            written: Vec::new(),
+        }))
+    }
+}
+
+#[cfg(test)]
+#[derive(Debug, Default)]
+struct MockSerialPortHandle {
+    written: Vec<u8>,
+    scripted_rx: VecDeque<Vec<u8>>,
+}
+
+#[cfg(test)]
+impl SerialPortHandle for MockSerialPortHandle {
+    fn write_bytes(&mut self, bytes: &[u8]) -> Result<usize, SerialError> {
+        self.written.extend_from_slice(bytes);
+        Ok(bytes.len())
+    }
+
+    fn read_available(&mut self, buffer: &mut [u8]) -> Result<usize, SerialError> {
+        let Some(mut chunk) = self.scripted_rx.pop_front() else {
+            return Ok(0);
+        };
+
+        let bytes_read = buffer.len().min(chunk.len());
+        buffer[..bytes_read].copy_from_slice(&chunk[..bytes_read]);
+
+        if bytes_read < chunk.len() {
+            let remainder = chunk.split_off(bytes_read);
+            self.scripted_rx.push_front(remainder);
+        }
+
+        Ok(bytes_read)
+    }
 }
 
 #[derive(Debug)]
 pub enum SerialError {
     ListPorts {
+        message: String,
+    },
+    OpenPort {
+        port_path: String,
+        message: String,
+    },
+    SessionNotFound {
+        session_id: String,
+    },
+    SessionNotConnected {
+        session_id: String,
+        state: SessionState,
+    },
+    Write {
+        message: String,
+    },
+    Read {
         message: String,
     },
     InvalidConfig {
@@ -124,6 +346,27 @@ impl fmt::Display for SerialError {
         match self {
             SerialError::ListPorts { message } => {
                 write!(formatter, "failed to list serial ports: {message}")
+            }
+            SerialError::OpenPort { port_path, message } => {
+                write!(
+                    formatter,
+                    "failed to open serial port `{port_path}`: {message}"
+                )
+            }
+            SerialError::SessionNotFound { session_id } => {
+                write!(formatter, "serial session `{session_id}` was not found")
+            }
+            SerialError::SessionNotConnected { session_id, state } => {
+                write!(
+                    formatter,
+                    "serial session `{session_id}` is not connected; current state is {state:?}"
+                )
+            }
+            SerialError::Write { message } => {
+                write!(formatter, "serial write failed: {message}")
+            }
+            SerialError::Read { message } => {
+                write!(formatter, "serial read failed: {message}")
             }
             SerialError::InvalidConfig { field, message } => {
                 write!(formatter, "invalid serial config `{field}`: {message}")
@@ -372,6 +615,257 @@ pub fn transition(state: SessionState, event: SessionEvent) -> Result<SessionSta
     Ok(next)
 }
 
+impl<B: SerialBackend> SessionManager<B> {
+    pub fn new(backend: B) -> Self {
+        Self {
+            backend,
+            sessions: HashMap::new(),
+            next_session_number: 1,
+        }
+    }
+
+    pub fn open_session(
+        &mut self,
+        request: OpenSessionRequest,
+    ) -> Result<OpenSessionResult, SerialError> {
+        let config = validate_serial_config(request.config)?;
+        let port = self.backend.open_port(&config)?;
+        let session_id = self.allocate_session_id();
+
+        self.sessions.insert(
+            session_id.clone(),
+            SerialSession {
+                config: config.clone(),
+                state: SessionState::Connected,
+                port: Some(port),
+                tx_bytes: 0,
+                rx_bytes: 0,
+                dropped_rx_bytes: 0,
+                next_rx_sequence: 1,
+                rx_queue_bytes: 0,
+                rx_queue_capacity_bytes: RX_QUEUE_CAPACITY_BYTES,
+                rx_queue: VecDeque::new(),
+                rx_worker_running: false,
+            },
+        );
+
+        Ok(OpenSessionResult {
+            session_id,
+            state: SessionState::Connected,
+            config,
+        })
+    }
+
+    pub fn close_session(&mut self, session_id: &str) -> Result<CloseSessionResult, SerialError> {
+        let session =
+            self.sessions
+                .get_mut(session_id)
+                .ok_or_else(|| SerialError::SessionNotFound {
+                    session_id: session_id.to_string(),
+                })?;
+
+        session.state = transition(session.state, SessionEvent::DisconnectRequested)?;
+        session.port.take();
+        session.state = transition(session.state, SessionEvent::DisconnectCompleted)?;
+
+        Ok(CloseSessionResult {
+            session_id: session_id.to_string(),
+            state: session.state,
+        })
+    }
+
+    pub fn write(&mut self, request: WriteRequest) -> Result<WriteResult, SerialError> {
+        let session = self.sessions.get_mut(&request.session_id).ok_or_else(|| {
+            SerialError::SessionNotFound {
+                session_id: request.session_id.clone(),
+            }
+        })?;
+
+        if session.state != SessionState::Connected {
+            return Err(SerialError::SessionNotConnected {
+                session_id: request.session_id,
+                state: session.state,
+            });
+        }
+
+        if request.bytes.is_empty() {
+            return Ok(WriteResult {
+                session_id: request.session_id,
+                bytes_written: 0,
+                tx_bytes: session.tx_bytes,
+                timestamp_wall_ms: timestamp_wall_ms(),
+            });
+        }
+
+        let port = session
+            .port
+            .as_mut()
+            .ok_or_else(|| SerialError::SessionNotConnected {
+                session_id: request.session_id.clone(),
+                state: session.state,
+            })?;
+
+        let timestamp_wall_ms = timestamp_wall_ms();
+        let bytes_written = port.write_bytes(&request.bytes)?;
+        session.tx_bytes += bytes_written as u64;
+
+        Ok(WriteResult {
+            session_id: request.session_id,
+            bytes_written,
+            tx_bytes: session.tx_bytes,
+            timestamp_wall_ms,
+        })
+    }
+
+    pub fn poll_rx_once(&mut self, session_id: &str) -> Result<Option<RxChunk>, SerialError> {
+        let session =
+            self.sessions
+                .get_mut(session_id)
+                .ok_or_else(|| SerialError::SessionNotFound {
+                    session_id: session_id.to_string(),
+                })?;
+
+        if session.state != SessionState::Connected {
+            return Err(SerialError::SessionNotConnected {
+                session_id: session_id.to_string(),
+                state: session.state,
+            });
+        }
+
+        let port = session
+            .port
+            .as_mut()
+            .ok_or_else(|| SerialError::SessionNotConnected {
+                session_id: session_id.to_string(),
+                state: session.state,
+            })?;
+
+        let mut buffer = vec![0; RX_READ_CHUNK_SIZE];
+        let bytes_read = port.read_available(&mut buffer)?;
+
+        if bytes_read == 0 {
+            return Ok(None);
+        }
+
+        buffer.truncate(bytes_read);
+        let chunk = RxChunk {
+            sequence: session.next_rx_sequence,
+            timestamp_wall_ms: timestamp_wall_ms(),
+            bytes: buffer,
+        };
+
+        session.next_rx_sequence += 1;
+        session.rx_bytes += bytes_read as u64;
+        push_rx_chunk(session, chunk.clone());
+
+        Ok(Some(chunk))
+    }
+
+    pub fn drain_rx(&mut self, session_id: &str) -> Result<RxBatch, SerialError> {
+        let session =
+            self.sessions
+                .get_mut(session_id)
+                .ok_or_else(|| SerialError::SessionNotFound {
+                    session_id: session_id.to_string(),
+                })?;
+
+        let chunks = session.rx_queue.drain(..).collect();
+        session.rx_queue_bytes = 0;
+
+        Ok(RxBatch {
+            session_id: session_id.to_string(),
+            chunks,
+            rx_bytes: session.rx_bytes,
+            queued_bytes: session.rx_queue_bytes,
+            dropped_rx_bytes: session.dropped_rx_bytes,
+            batch_interval_ms: RX_BATCH_INTERVAL_MS,
+            drained_at_wall_ms: timestamp_wall_ms(),
+        })
+    }
+
+    pub fn mark_rx_worker_started(&mut self, session_id: &str) -> Result<bool, SerialError> {
+        let session =
+            self.sessions
+                .get_mut(session_id)
+                .ok_or_else(|| SerialError::SessionNotFound {
+                    session_id: session_id.to_string(),
+                })?;
+
+        if session.rx_worker_running {
+            return Ok(false);
+        }
+
+        session.rx_worker_running = true;
+        Ok(true)
+    }
+
+    pub fn mark_rx_worker_stopped(&mut self, session_id: &str) {
+        if let Some(session) = self.sessions.get_mut(session_id) {
+            session.rx_worker_running = false;
+        }
+    }
+
+    pub fn mark_read_error(&mut self, session_id: &str) {
+        if let Some(session) = self.sessions.get_mut(session_id) {
+            session.state = SessionState::Error;
+            session.port.take();
+        }
+    }
+
+    pub fn state(&self, session_id: &str) -> Result<SessionState, SerialError> {
+        self.sessions
+            .get(session_id)
+            .map(|session| session.state)
+            .ok_or_else(|| SerialError::SessionNotFound {
+                session_id: session_id.to_string(),
+            })
+    }
+
+    pub fn config(&self, session_id: &str) -> Result<&SerialConfig, SerialError> {
+        self.sessions
+            .get(session_id)
+            .map(|session| &session.config)
+            .ok_or_else(|| SerialError::SessionNotFound {
+                session_id: session_id.to_string(),
+            })
+    }
+
+    fn allocate_session_id(&mut self) -> String {
+        let session_id = format!("session-{}", self.next_session_number);
+        self.next_session_number += 1;
+        session_id
+    }
+}
+
+fn push_rx_chunk(session: &mut SerialSession, mut chunk: RxChunk) {
+    let chunk_len = chunk.bytes.len();
+    if chunk_len > session.rx_queue_capacity_bytes {
+        let bytes_to_keep = session.rx_queue_capacity_bytes;
+        session.dropped_rx_bytes += (chunk_len - bytes_to_keep) as u64;
+        chunk.bytes = chunk.bytes[chunk_len - bytes_to_keep..].to_vec();
+    }
+
+    while session.rx_queue_bytes + chunk.bytes.len() > session.rx_queue_capacity_bytes {
+        let Some(dropped) = session.rx_queue.pop_front() else {
+            break;
+        };
+
+        let dropped_len = dropped.bytes.len();
+        session.rx_queue_bytes -= dropped_len;
+        session.dropped_rx_bytes += dropped_len as u64;
+    }
+
+    session.rx_queue_bytes += chunk.bytes.len();
+    session.rx_queue.push_back(chunk);
+}
+
+fn timestamp_wall_ms() -> u128 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_millis())
+        .unwrap_or_default()
+}
+
 fn normalize_token(value: &str) -> String {
     value
         .chars()
@@ -538,6 +1032,225 @@ mod tests {
         assert!(matches!(error, SerialError::InvalidTransition { .. }));
     }
 
+    #[test]
+    fn session_manager_opens_and_closes_mock_session() {
+        let mut manager = SessionManager::new(MockSerialBackend::new(vec![mock_port(
+            "/dev/ttyUSB0",
+            "Adapter A",
+        )]));
+
+        let opened = manager
+            .open_session(OpenSessionRequest {
+                config: valid_config_input("/dev/ttyUSB0"),
+            })
+            .expect("session should open");
+
+        assert_eq!(opened.state, SessionState::Connected);
+        assert_eq!(
+            manager.config(&opened.session_id).unwrap().port_path,
+            "/dev/ttyUSB0"
+        );
+
+        let closed = manager
+            .close_session(&opened.session_id)
+            .expect("session should close");
+
+        assert_eq!(closed.state, SessionState::Disconnected);
+    }
+
+    #[test]
+    fn session_manager_surfaces_driver_open_error() {
+        let mut manager = SessionManager::new(MockSerialBackend::failing_open(vec![mock_port(
+            "/dev/ttyUSB0",
+            "Adapter A",
+        )]));
+
+        let error = manager
+            .open_session(OpenSessionRequest {
+                config: valid_config_input("/dev/ttyUSB0"),
+            })
+            .expect_err("mock driver should reject open");
+
+        assert!(matches!(error, SerialError::OpenPort { .. }));
+    }
+
+    #[test]
+    fn session_manager_writes_and_counts_tx_bytes() {
+        let mut manager = SessionManager::new(MockSerialBackend::new(vec![mock_port(
+            "/dev/ttyUSB0",
+            "Adapter A",
+        )]));
+        let opened = manager
+            .open_session(OpenSessionRequest {
+                config: valid_config_input("/dev/ttyUSB0"),
+            })
+            .expect("session should open");
+
+        let first = manager
+            .write(WriteRequest {
+                session_id: opened.session_id.clone(),
+                bytes: vec![0x41, 0x54],
+            })
+            .expect("write should pass");
+        let second = manager
+            .write(WriteRequest {
+                session_id: opened.session_id,
+                bytes: vec![0x0d, 0x0a],
+            })
+            .expect("write should pass");
+
+        assert_eq!(first.bytes_written, 2);
+        assert_eq!(first.tx_bytes, 2);
+        assert_eq!(second.bytes_written, 2);
+        assert_eq!(second.tx_bytes, 4);
+    }
+
+    #[test]
+    fn session_manager_rejects_write_to_closed_session() {
+        let mut manager = SessionManager::new(MockSerialBackend::new(vec![mock_port(
+            "/dev/ttyUSB0",
+            "Adapter A",
+        )]));
+        let opened = manager
+            .open_session(OpenSessionRequest {
+                config: valid_config_input("/dev/ttyUSB0"),
+            })
+            .expect("session should open");
+        manager.close_session(&opened.session_id).unwrap();
+
+        let error = manager
+            .write(WriteRequest {
+                session_id: opened.session_id,
+                bytes: vec![0x41],
+            })
+            .expect_err("closed session write should fail");
+
+        assert!(matches!(error, SerialError::SessionNotConnected { .. }));
+    }
+
+    #[test]
+    fn session_manager_polls_rx_with_sequence_timestamp_and_counter() {
+        let mut manager = SessionManager::new(MockSerialBackend::with_rx(
+            vec![mock_port("/dev/ttyUSB0", "Adapter A")],
+            vec![vec![0x41, 0x42], vec![0x43]],
+        ));
+        let opened = manager
+            .open_session(OpenSessionRequest {
+                config: valid_config_input("/dev/ttyUSB0"),
+            })
+            .expect("session should open");
+
+        let first = manager
+            .poll_rx_once(&opened.session_id)
+            .expect("rx poll should pass")
+            .expect("first rx chunk should exist");
+        let second = manager
+            .poll_rx_once(&opened.session_id)
+            .expect("rx poll should pass")
+            .expect("second rx chunk should exist");
+
+        assert_eq!(first.sequence, 1);
+        assert_eq!(first.bytes, vec![0x41, 0x42]);
+        assert!(first.timestamp_wall_ms > 0);
+        assert_eq!(second.sequence, 2);
+        assert_eq!(second.bytes, vec![0x43]);
+
+        let batch = manager
+            .drain_rx(&opened.session_id)
+            .expect("rx drain should pass");
+        assert_eq!(batch.rx_bytes, 3);
+        assert_eq!(batch.chunks.len(), 2);
+        assert_eq!(batch.batch_interval_ms, RX_BATCH_INTERVAL_MS);
+    }
+
+    #[test]
+    fn session_manager_drains_rx_queue_without_resetting_counters() {
+        let mut manager = SessionManager::new(MockSerialBackend::with_rx(
+            vec![mock_port("/dev/ttyUSB0", "Adapter A")],
+            vec![vec![0x10], vec![0x11]],
+        ));
+        let opened = manager
+            .open_session(OpenSessionRequest {
+                config: valid_config_input("/dev/ttyUSB0"),
+            })
+            .expect("session should open");
+
+        poll_all_rx(&mut manager, &opened.session_id);
+        let first_batch = manager.drain_rx(&opened.session_id).unwrap();
+        let second_batch = manager.drain_rx(&opened.session_id).unwrap();
+
+        assert_eq!(first_batch.rx_bytes, 2);
+        assert_eq!(first_batch.queued_bytes, 0);
+        assert_eq!(first_batch.chunks.len(), 2);
+        assert_eq!(second_batch.rx_bytes, 2);
+        assert!(second_batch.chunks.is_empty());
+    }
+
+    #[test]
+    fn session_manager_bounds_rx_queue_when_renderer_falls_behind() {
+        let scripted_rx = (0..10).map(|value| vec![value; 8]).collect();
+        let mut manager = SessionManager::new(MockSerialBackend::with_rx(
+            vec![mock_port("/dev/ttyUSB0", "Adapter A")],
+            scripted_rx,
+        ));
+        let opened = manager
+            .open_session(OpenSessionRequest {
+                config: valid_config_input("/dev/ttyUSB0"),
+            })
+            .expect("session should open");
+
+        manager
+            .sessions
+            .get_mut(&opened.session_id)
+            .expect("session should exist")
+            .rx_queue_capacity_bytes = 24;
+
+        poll_all_rx(&mut manager, &opened.session_id);
+        let batch = manager.drain_rx(&opened.session_id).unwrap();
+
+        assert_eq!(batch.rx_bytes, 80);
+        assert_eq!(batch.dropped_rx_bytes, 56);
+        assert_eq!(batch.chunks.len(), 3);
+        assert_eq!(batch.chunks[0].bytes, vec![7; 8]);
+        assert_eq!(batch.chunks[2].bytes, vec![9; 8]);
+    }
+
+    #[test]
+    fn session_manager_mock_gate_connect_receive_transmit_disconnect() {
+        let mut manager = SessionManager::new(MockSerialBackend::with_rx(
+            vec![mock_port("/dev/ttyUSB0", "Adapter A")],
+            vec![vec![0x52, 0x58]],
+        ));
+        let opened = manager
+            .open_session(OpenSessionRequest {
+                config: valid_config_input("/dev/ttyUSB0"),
+            })
+            .expect("session should open");
+
+        poll_all_rx(&mut manager, &opened.session_id);
+        let rx_batch = manager.drain_rx(&opened.session_id).unwrap();
+        let tx = manager
+            .write(WriteRequest {
+                session_id: opened.session_id.clone(),
+                bytes: vec![0x54, 0x58],
+            })
+            .expect("write should pass");
+        let closed = manager.close_session(&opened.session_id).unwrap();
+
+        assert_eq!(rx_batch.rx_bytes, 2);
+        assert_eq!(rx_batch.chunks[0].bytes, vec![0x52, 0x58]);
+        assert_eq!(tx.tx_bytes, 2);
+        assert_eq!(closed.state, SessionState::Disconnected);
+    }
+
+    fn poll_all_rx<B: SerialBackend>(manager: &mut SessionManager<B>, session_id: &str) {
+        while manager
+            .poll_rx_once(session_id)
+            .expect("rx poll should pass")
+            .is_some()
+        {}
+    }
+
     fn mock_port(path: &str, display_name: &str) -> SerialPortSummary {
         SerialPortSummary {
             path: path.to_string(),
@@ -548,6 +1261,17 @@ mod tests {
             manufacturer: Some("Silicon Labs".to_string()),
             product: Some(display_name.to_string()),
             port_type: "usb".to_string(),
+        }
+    }
+
+    fn valid_config_input(port_path: &str) -> SerialConfigInput {
+        SerialConfigInput {
+            port_path: port_path.to_string(),
+            baud_rate: 115200,
+            data_bits: 8,
+            parity: "none".to_string(),
+            stop_bits: 1.0,
+            flow_control: "none".to_string(),
         }
     }
 }

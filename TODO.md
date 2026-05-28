@@ -240,7 +240,7 @@ Goal: reliable single-session serial I/O and lifecycle.
 
 - [x] `SER-020` Support standard baud dropdown values. Completed 2026-05-28 at backend validation/API level.
 - [x] `SER-021` Support positive integer custom baud. Completed 2026-05-28 at backend validation/API level.
-- [ ] `SER-022` Surface driver rejection for unsupported custom baud.
+- [x] `SER-022` Surface driver rejection for unsupported custom baud. Completed 2026-05-28 through `open_serial_session` backend open errors.
 - [x] `SER-023` Support data bits 5, 6, 7, 8. Completed 2026-05-28.
 - [~] `SER-024` Support parity none, even, odd, mark, space. API accepts all values; current backend supports none/even/odd and returns explicit unsupported errors for mark/space.
 - [~] `SER-025` Support stop bits 1, 1.5, 2. API accepts all values; current backend supports 1/2 and returns explicit unsupported error for 1.5.
@@ -266,25 +266,25 @@ Goal: reliable single-session serial I/O and lifecycle.
 
 ### 3.5 RX Path
 
-- [ ] `SER-050` Capture RX timestamp in Rust when data arrives.
-- [ ] `SER-051` Assign monotonically increasing RX sequence numbers.
-- [ ] `SER-052` Push bytes into non-renderer queue/ring buffer.
-- [ ] `SER-053` Drain RX queue every 16 ms or configured batch interval.
-- [ ] `SER-054` Emit batched RX payload to frontend.
-- [ ] `SER-055` Maintain authoritative RX byte counter.
-- [ ] `SER-056` Ensure renderer slowdown does not block serial read loop.
-- [ ] `SER-057` Add RX path stress tests.
+- [x] `SER-050` Capture RX timestamp in Rust when data arrives. Completed 2026-05-28.
+- [x] `SER-051` Assign monotonically increasing RX sequence numbers. Completed 2026-05-28.
+- [x] `SER-052` Push bytes into non-renderer queue/ring buffer. Completed 2026-05-28 with bounded backend queue.
+- [x] `SER-053` Drain RX queue every 16 ms or configured batch interval. Completed 2026-05-28 with backend worker using 16 ms interval.
+- [x] `SER-054` Emit batched RX payload to frontend. Completed 2026-05-28 through `serial-rx-batch` Tauri event.
+- [x] `SER-055` Maintain authoritative RX byte counter. Completed 2026-05-28.
+- [x] `SER-056` Ensure renderer slowdown does not block serial read loop. Completed 2026-05-28 with drop-oldest bounded queue behavior.
+- [x] `SER-057` Add RX path stress tests. Completed 2026-05-28 for mock backend queue pressure.
 
 ### 3.6 TX Path
 
-- [ ] `SER-060` Implement backend write command by session ID.
-- [ ] `SER-061` Record TX timestamp in Rust at write call time.
-- [ ] `SER-062` Return byte count on success.
-- [ ] `SER-063` Return structured error on write failure.
-- [ ] `SER-064` Handle port disappearing mid-write.
+- [x] `SER-060` Implement backend write command by session ID. Completed 2026-05-28.
+- [x] `SER-061` Record TX timestamp in Rust at write call time. Completed 2026-05-28.
+- [x] `SER-062` Return byte count on success. Completed 2026-05-28.
+- [x] `SER-063` Return structured error on write failure. Completed 2026-05-28.
+- [x] `SER-064` Handle port disappearing mid-write. Completed 2026-05-28 at write-error surface level; Hot-unplug transition remains under hotplug work.
 - [ ] `SER-065` Log partial TX marker when appropriate.
-- [ ] `SER-066` Maintain authoritative TX byte counter.
-- [ ] `SER-067` Add TX unit and integration tests.
+- [x] `SER-066` Maintain authoritative TX byte counter. Completed 2026-05-28.
+- [x] `SER-067` Add TX unit and integration tests. Completed 2026-05-28 for mock backend.
 
 ### 3.7 Hotplug And Signals
 
@@ -301,7 +301,7 @@ Goal: reliable single-session serial I/O and lifecycle.
 
 ### 3.8 Phase 2 Exit Gate
 
-- [ ] `GATE-020` Single session can connect, receive, transmit, disconnect, and reconnect with mock backend.
+- [~] `GATE-020` Single session can connect, receive, transmit, disconnect, and reconnect with mock backend. Connect, receive, transmit, and disconnect covered 2026-05-28; reconnect remains pending.
 - [x] `GATE-021` State machine tests cover all documented states. Completed 2026-05-28.
 - [ ] `GATE-022` Hot-unplug mock test passes.
 - [ ] `GATE-023` Real loopback smoke test passes on at least one adapter.
