@@ -1288,6 +1288,7 @@ impl<B: SerialBackend> SessionManager<B> {
         session_id: &str,
         logged_bytes: u64,
         current_size: u64,
+        current_path: String,
     ) -> Result<(), SerialError> {
         let session =
             self.sessions
@@ -1299,6 +1300,7 @@ impl<B: SerialBackend> SessionManager<B> {
         if let Some(logger) = &mut session.logger {
             logger.logged_bytes += logged_bytes;
             logger.current_size = current_size;
+            logger.path = current_path;
         }
 
         Ok(())
@@ -2165,13 +2167,14 @@ mod tests {
             )
             .unwrap();
         manager
-            .record_logged_bytes(&opened.session_id, 12, 22)
+            .record_logged_bytes(&opened.session_id, 12, 22, ".dev-data/next.log".to_string())
             .unwrap();
         let stopped = manager.request_stop_log(&opened.session_id).unwrap();
 
         assert!(!stopped.status.active);
         assert_eq!(stopped.status.logged_bytes, 12);
         assert_eq!(stopped.status.current_size, 22);
+        assert_eq!(stopped.status.path.as_deref(), Some(".dev-data/next.log"));
     }
 
     #[test]
@@ -2210,6 +2213,50 @@ mod tests {
         assert_eq!(status.error.as_deref(), Some("disk full"));
         assert_eq!(status.rx_bytes, 1);
         assert!(records.is_empty());
+    }
+
+    #[test]
+    fn session_manager_allows_new_log_path_after_log_error() {
+        let mut manager = SessionManager::new(MockSerialBackend::new(vec![mock_port(
+            "/dev/ttyUSB0",
+            "Adapter A",
+        )]));
+        let opened = manager
+            .open_session(OpenSessionRequest {
+                config: valid_config_input("/dev/ttyUSB0"),
+                auto_log: None,
+            })
+            .expect("session should open");
+        manager
+            .start_log(
+                &opened.session_id,
+                ".dev-data/failed.log".to_string(),
+                LogFormat::Binary,
+                0,
+            )
+            .expect("first log should start");
+        manager
+            .mark_log_error(&opened.session_id, "permission denied".to_string())
+            .expect("log error should be recorded");
+
+        let recovered = manager
+            .start_log(
+                &opened.session_id,
+                ".dev-data/recovered.log".to_string(),
+                LogFormat::TimestampedText,
+                128,
+            )
+            .expect("new path should recover logging");
+
+        assert_eq!(
+            manager.state(&opened.session_id).unwrap(),
+            SessionState::Connected
+        );
+        assert!(recovered.active);
+        assert_eq!(recovered.path.as_deref(), Some(".dev-data/recovered.log"));
+        assert_eq!(recovered.format, Some(LogFormat::TimestampedText));
+        assert_eq!(recovered.current_size, 128);
+        assert_eq!(recovered.error, None);
     }
 
     #[test]

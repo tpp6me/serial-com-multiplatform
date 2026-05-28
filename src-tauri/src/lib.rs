@@ -4,7 +4,8 @@ mod serial;
 
 use config::{load_or_create_config, AppConfig, ConfigLoadResult};
 use logging::{
-    AutoLogRequest, LogFormat, LogStatus, LogWriter, StartLogRequest, StopLogRequest, StopLogResult,
+    AutoLogRequest, LogFormat, LogRotationConfig, LogStatus, LogWriter, LogWriterOptions,
+    StartLogRequest, StopLogRequest, StopLogResult,
 };
 use serde::Serialize;
 use serial::{
@@ -248,6 +249,9 @@ fn serial_start_log(
             path: request.path,
             format: request.format,
             append: request.append,
+            rotation_size_bytes: request.rotation_size_bytes,
+            rotation_period: request.rotation_period,
+            max_files_to_keep: request.max_files_to_keep,
         },
     )
 }
@@ -275,13 +279,29 @@ fn start_log_for_session(
             .log_metadata(&session_id)
             .map_err(|error| error.to_string())?
     };
-    let writer = LogWriter::open(&path, format, request.append, &metadata)
-        .map_err(|error| error.to_string())?;
+    let rotation = LogRotationConfig::from_request(
+        request.rotation_size_bytes,
+        request.rotation_period.as_deref(),
+        request.max_files_to_keep,
+    )
+    .map_err(|error| error.to_string())?;
+    let writer = LogWriter::open_with_options(
+        &path,
+        format,
+        &metadata,
+        LogWriterOptions {
+            append: request.append,
+            rotation,
+            started_at_wall_ms: metadata.started_at_wall_ms,
+        },
+    )
+    .map_err(|error| error.to_string())?;
     let current_size = writer.current_size();
+    let current_path = writer.current_path().display().to_string();
     let status = manager
         .lock()
         .map_err(|_| "serial session manager lock poisoned".to_string())?
-        .start_log(&session_id, request.path, format, current_size)
+        .start_log(&session_id, current_path, format, current_size)
         .map_err(|error| error.to_string())?;
 
     start_serial_log_worker(manager, session_id, writer)?;
@@ -428,6 +448,7 @@ fn start_serial_log_worker(
                                 &session_id,
                                 logged_bytes,
                                 writer.current_size(),
+                                writer.current_path().display().to_string(),
                             );
                         }
                     }
@@ -454,6 +475,10 @@ fn start_serial_log_worker(
             }
 
             thread::sleep(Duration::from_millis(10));
+        }
+
+        if let Err(error) = writer.finish() {
+            mark_serial_log_error(&manager, &session_id, error);
         }
 
         if let Ok(mut manager) = manager.lock() {

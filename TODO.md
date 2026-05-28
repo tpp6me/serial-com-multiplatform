@@ -345,14 +345,14 @@ Goal: byte-accurate logging with explicit failure behavior.
 
 ### 4.4 Rotation
 
-- [ ] `LOG-030` Implement filename template tokens.
-- [ ] `LOG-031` Sanitize port names for filenames.
-- [ ] `LOG-032` Implement size-based rotation.
-- [ ] `LOG-033` Implement time-based rotation.
-- [ ] `LOG-034` Implement max files retention.
-- [ ] `LOG-035` `fsync` on rotation boundary.
-- [ ] `LOG-036` `fsync` on session close.
-- [ ] `LOG-037` Add rotation tests.
+- [x] `LOG-030` Implement filename template tokens. Completed 2026-05-28 with `{port}`, `{sessionId}`, `{baudRate}`, `{timestampWallMs}`, `{timestamp}`, `{YYYY-MM-DD_HH-mm-ss}`, `{YYYYMMDD_HHmmss}`, `{date}`, and `{time}`.
+- [x] `LOG-031` Sanitize port names for filenames. Completed 2026-05-28.
+- [x] `LOG-032` Implement size-based rotation. Completed 2026-05-28.
+- [x] `LOG-033` Implement time-based rotation. Completed 2026-05-28 for hourly and daily periods.
+- [x] `LOG-034` Implement max files retention. Completed 2026-05-28.
+- [x] `LOG-035` `fsync` on rotation boundary. Completed 2026-05-28.
+- [x] `LOG-036` `fsync` on session close. Completed 2026-05-28.
+- [x] `LOG-037` Add rotation tests. Completed 2026-05-28.
 
 ### 4.5 Failure Modes
 
@@ -362,7 +362,7 @@ Goal: byte-accurate logging with explicit failure behavior.
 - [x] `LOG-043` Pause logging on unrecoverable write error. Completed 2026-05-28.
 - [x] `LOG-044` Keep serial session connected after logging failure. Completed 2026-05-28.
 - [x] `LOG-045` Show persistent error status to UI. Completed 2026-05-28 through `serial_log_status`.
-- [ ] `LOG-046` Allow choose-new-path recovery.
+- [x] `LOG-046` Allow choose-new-path recovery. Completed 2026-05-28 at the backend command/session layer.
 - [x] `LOG-047` Allow stop-logging recovery. Completed 2026-05-28.
 - [x] `LOG-048` Increment overrun counter when logger falls behind. Completed 2026-05-28.
 - [~] `LOG-049` Add failure-mode tests. Partial 2026-05-28: simulated unrecoverable log error keeps session connected and exposes persistent error status.
@@ -371,8 +371,8 @@ Goal: byte-accurate logging with explicit failure behavior.
 
 - [ ] `GATE-030` Healthy logging has matching RX/logged counters.
 - [ ] `GATE-031` Disk/path failures do not disconnect serial session.
-- [ ] `GATE-032` Binary fixture `00..FF` round-trips through binary log.
-- [ ] `GATE-033` Rotation tests pass with metadata and counters intact.
+- [x] `GATE-032` Binary fixture `00..FF` round-trips through binary log. Completed 2026-05-28.
+- [x] `GATE-033` Rotation tests pass with metadata and counters intact. Completed 2026-05-28.
 
 ## 5. Phase 4 - Terminal Data Model And Renderer
 
