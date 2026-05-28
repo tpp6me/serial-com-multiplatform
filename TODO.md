@@ -291,19 +291,19 @@ Goal: reliable single-session serial I/O and lifecycle.
 - [ ] `SER-070` Implement macOS hotplug source.
 - [ ] `SER-071` Implement Windows hotplug source.
 - [ ] `SER-072` Implement Linux hotplug source.
-- [ ] `SER-073` Implement polling fallback.
-- [ ] `SER-074` Update port list after insertion.
-- [ ] `SER-075` Update port list after removal.
-- [ ] `SER-076` Transition active session to Hot-unplugged on removal.
+- [x] `SER-073` Implement polling fallback. Completed 2026-05-28 with backend poll worker.
+- [x] `SER-074` Update port list after insertion. Completed 2026-05-28 through `serial-port-list-changed` event payload.
+- [x] `SER-075` Update port list after removal. Completed 2026-05-28 through `serial-port-list-changed` event payload.
+- [x] `SER-076` Transition active session to Hot-unplugged on removal. Completed 2026-05-28.
 - [ ] `SER-077` Implement manual DTR toggle.
 - [ ] `SER-078` Implement manual RTS toggle.
 - [ ] `SER-079` Add best-effort CTS/DSR/DCD/RI read only if v1.1/could scope is pulled forward.
 
 ### 3.8 Phase 2 Exit Gate
 
-- [~] `GATE-020` Single session can connect, receive, transmit, disconnect, and reconnect with mock backend. Connect, receive, transmit, and disconnect covered 2026-05-28; reconnect remains pending.
+- [x] `GATE-020` Single session can connect, receive, transmit, disconnect, and reconnect with mock backend. Completed 2026-05-28.
 - [x] `GATE-021` State machine tests cover all documented states. Completed 2026-05-28.
-- [ ] `GATE-022` Hot-unplug mock test passes.
+- [x] `GATE-022` Hot-unplug mock test passes. Completed 2026-05-28.
 - [ ] `GATE-023` Real loopback smoke test passes on at least one adapter.
 
 ## 4. Phase 3 - Logging Core

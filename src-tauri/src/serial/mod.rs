@@ -6,6 +6,7 @@ use std::time::Duration;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 pub const RX_BATCH_INTERVAL_MS: u64 = 16;
+pub const HOTPLUG_POLL_INTERVAL_MS: u64 = 1000;
 const RX_QUEUE_CAPACITY_BYTES: usize = 1024 * 1024;
 const RX_READ_CHUNK_SIZE: usize = 4096;
 
@@ -135,6 +136,28 @@ pub struct RxBatch {
 pub struct CloseSessionResult {
     pub session_id: String,
     pub state: SessionState,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq, PartialOrd, Ord)]
+#[serde(rename_all = "camelCase")]
+pub enum PortChangeKind {
+    Inserted,
+    Removed,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct PortChange {
+    pub kind: PortChangeKind,
+    pub port: SerialPortSummary,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct HotplugPollResult {
+    pub ports: Vec<SerialPortSummary>,
+    pub changes: Vec<PortChange>,
+    pub hot_unplugged_sessions: Vec<String>,
 }
 
 pub struct SessionManager<B: SerialBackend> {
@@ -453,6 +476,49 @@ pub fn list_ports_with<B: SerialBackend>(
     Ok(ports)
 }
 
+pub fn diff_port_lists(
+    previous_ports: &[SerialPortSummary],
+    current_ports: &[SerialPortSummary],
+) -> Vec<PortChange> {
+    let previous_by_path: HashMap<&str, &SerialPortSummary> = previous_ports
+        .iter()
+        .map(|port| (port.path.as_str(), port))
+        .collect();
+    let current_by_path: HashMap<&str, &SerialPortSummary> = current_ports
+        .iter()
+        .map(|port| (port.path.as_str(), port))
+        .collect();
+
+    let mut changes = Vec::new();
+
+    for port in current_ports {
+        if !previous_by_path.contains_key(port.path.as_str()) {
+            changes.push(PortChange {
+                kind: PortChangeKind::Inserted,
+                port: port.clone(),
+            });
+        }
+    }
+
+    for port in previous_ports {
+        if !current_by_path.contains_key(port.path.as_str()) {
+            changes.push(PortChange {
+                kind: PortChangeKind::Removed,
+                port: port.clone(),
+            });
+        }
+    }
+
+    changes.sort_by(|left, right| {
+        left.port
+            .path
+            .cmp(&right.port.path)
+            .then(left.kind.cmp(&right.kind))
+    });
+
+    changes
+}
+
 pub fn validate_serial_config(input: SerialConfigInput) -> Result<SerialConfig, SerialError> {
     if input.port_path.trim().is_empty() {
         return Err(SerialError::InvalidConfig {
@@ -606,6 +672,7 @@ pub fn transition(state: SessionState, event: SessionEvent) -> Result<SessionSta
         }
         (SessionState::Reconnecting, SessionEvent::ReconnectSucceeded) => SessionState::Connected,
         (SessionState::Reconnecting, SessionEvent::RetryCancelled) => SessionState::Disconnected,
+        (SessionState::HotUnplugged, SessionEvent::RetryCancelled) => SessionState::Disconnected,
         (SessionState::Error, SessionEvent::RetryCancelled) => SessionState::Disconnected,
         (from, event) => {
             return Err(SerialError::InvalidTransition { from, event });
@@ -664,14 +731,112 @@ impl<B: SerialBackend> SessionManager<B> {
                     session_id: session_id.to_string(),
                 })?;
 
-        session.state = transition(session.state, SessionEvent::DisconnectRequested)?;
+        session.state = match session.state {
+            SessionState::Connected => {
+                transition(session.state, SessionEvent::DisconnectRequested)?
+            }
+            SessionState::HotUnplugged | SessionState::Reconnecting | SessionState::Error => {
+                transition(session.state, SessionEvent::RetryCancelled)?
+            }
+            state => transition(state, SessionEvent::DisconnectRequested)?,
+        };
         session.port.take();
-        session.state = transition(session.state, SessionEvent::DisconnectCompleted)?;
+        if session.state == SessionState::Disconnecting {
+            session.state = transition(session.state, SessionEvent::DisconnectCompleted)?;
+        }
 
         Ok(CloseSessionResult {
             session_id: session_id.to_string(),
             state: session.state,
         })
+    }
+
+    pub fn reconnect_session(
+        &mut self,
+        session_id: &str,
+    ) -> Result<OpenSessionResult, SerialError> {
+        let config = {
+            let session =
+                self.sessions
+                    .get_mut(session_id)
+                    .ok_or_else(|| SerialError::SessionNotFound {
+                        session_id: session_id.to_string(),
+                    })?;
+
+            session.state = transition(session.state, SessionEvent::ReconnectRequested)?;
+            session.config.clone()
+        };
+
+        match self.backend.open_port(&config) {
+            Ok(port) => {
+                let session = self.sessions.get_mut(session_id).ok_or_else(|| {
+                    SerialError::SessionNotFound {
+                        session_id: session_id.to_string(),
+                    }
+                })?;
+
+                session.port = Some(port);
+                session.state = transition(session.state, SessionEvent::ReconnectSucceeded)?;
+                session.rx_worker_running = false;
+
+                Ok(OpenSessionResult {
+                    session_id: session_id.to_string(),
+                    state: session.state,
+                    config,
+                })
+            }
+            Err(error) => {
+                if let Some(session) = self.sessions.get_mut(session_id) {
+                    session.state = SessionState::Error;
+                    session.port.take();
+                    session.rx_worker_running = false;
+                }
+                Err(error)
+            }
+        }
+    }
+
+    pub fn poll_hotplug(
+        &mut self,
+        previous_ports: &[SerialPortSummary],
+    ) -> Result<HotplugPollResult, SerialError> {
+        let ports = self.current_ports()?;
+        let changes = diff_port_lists(previous_ports, &ports);
+        let mut hot_unplugged_sessions = Vec::new();
+
+        for change in &changes {
+            if change.kind == PortChangeKind::Removed {
+                hot_unplugged_sessions.extend(self.mark_port_removed(&change.port.path)?);
+            }
+        }
+
+        hot_unplugged_sessions.sort();
+        hot_unplugged_sessions.dedup();
+
+        Ok(HotplugPollResult {
+            ports,
+            changes,
+            hot_unplugged_sessions,
+        })
+    }
+
+    pub fn mark_port_removed(&mut self, port_path: &str) -> Result<Vec<String>, SerialError> {
+        let mut hot_unplugged_sessions = Vec::new();
+
+        for (session_id, session) in &mut self.sessions {
+            if session.config.port_path == port_path && session.state == SessionState::Connected {
+                session.state = transition(session.state, SessionEvent::HotUnplugDetected)?;
+                session.port.take();
+                session.rx_worker_running = false;
+                hot_unplugged_sessions.push(session_id.clone());
+            }
+        }
+
+        Ok(hot_unplugged_sessions)
+    }
+
+    pub fn current_ports(&self) -> Result<Vec<SerialPortSummary>, SerialError> {
+        list_ports_with(&self.backend)
     }
 
     pub fn write(&mut self, request: WriteRequest) -> Result<WriteResult, SerialError> {
@@ -898,6 +1063,26 @@ mod tests {
     }
 
     #[test]
+    fn port_diff_reports_insertions_and_removals() {
+        let previous = vec![
+            mock_port("/dev/ttyUSB0", "Adapter A"),
+            mock_port("/dev/ttyUSB1", "Adapter B"),
+        ];
+        let current = vec![
+            mock_port("/dev/ttyUSB1", "Adapter B"),
+            mock_port("/dev/ttyUSB2", "Adapter C"),
+        ];
+
+        let changes = diff_port_lists(&previous, &current);
+
+        assert_eq!(changes.len(), 2);
+        assert_eq!(changes[0].kind, PortChangeKind::Removed);
+        assert_eq!(changes[0].port.path, "/dev/ttyUSB0");
+        assert_eq!(changes[1].kind, PortChangeKind::Inserted);
+        assert_eq!(changes[1].port.path, "/dev/ttyUSB2");
+    }
+
+    #[test]
     fn friendly_display_name_falls_back_to_port_path() {
         assert_eq!(friendly_display_name("COM3", None), "COM3");
         assert_eq!(friendly_display_name("COM3", Some("")), "COM3");
@@ -1022,6 +1207,14 @@ mod tests {
     }
 
     #[test]
+    fn session_state_transitions_cover_hot_unplug_cancel_flow() {
+        let state = transition(SessionState::Connected, SessionEvent::HotUnplugDetected).unwrap();
+        let state = transition(state, SessionEvent::RetryCancelled).unwrap();
+
+        assert_eq!(state, SessionState::Disconnected);
+    }
+
+    #[test]
     fn session_state_rejects_invalid_transition() {
         let error = transition(
             SessionState::Disconnected,
@@ -1129,6 +1322,76 @@ mod tests {
     }
 
     #[test]
+    fn session_manager_marks_active_session_hot_unplugged_on_removed_port() {
+        let previous_ports = vec![mock_port("/dev/ttyUSB0", "Adapter A")];
+        let mut manager = SessionManager::new(MockSerialBackend::new(Vec::new()));
+        let opened = manager
+            .open_session(OpenSessionRequest {
+                config: valid_config_input("/dev/ttyUSB0"),
+            })
+            .expect("session should open");
+
+        let poll_result = manager
+            .poll_hotplug(&previous_ports)
+            .expect("hotplug poll should pass");
+
+        assert_eq!(poll_result.changes.len(), 1);
+        assert_eq!(poll_result.changes[0].kind, PortChangeKind::Removed);
+        assert_eq!(
+            poll_result.hot_unplugged_sessions,
+            vec![opened.session_id.clone()]
+        );
+        assert_eq!(
+            manager.state(&opened.session_id).unwrap(),
+            SessionState::HotUnplugged
+        );
+    }
+
+    #[test]
+    fn session_manager_can_close_hot_unplugged_session() {
+        let mut manager = SessionManager::new(MockSerialBackend::new(vec![mock_port(
+            "/dev/ttyUSB0",
+            "Adapter A",
+        )]));
+        let opened = manager
+            .open_session(OpenSessionRequest {
+                config: valid_config_input("/dev/ttyUSB0"),
+            })
+            .expect("session should open");
+
+        let affected = manager.mark_port_removed("/dev/ttyUSB0").unwrap();
+        let closed = manager.close_session(&opened.session_id).unwrap();
+
+        assert_eq!(affected, vec![opened.session_id]);
+        assert_eq!(closed.state, SessionState::Disconnected);
+    }
+
+    #[test]
+    fn session_manager_reconnects_hot_unplugged_session() {
+        let mut manager = SessionManager::new(MockSerialBackend::new(vec![mock_port(
+            "/dev/ttyUSB0",
+            "Adapter A",
+        )]));
+        let opened = manager
+            .open_session(OpenSessionRequest {
+                config: valid_config_input("/dev/ttyUSB0"),
+            })
+            .expect("session should open");
+
+        manager.mark_port_removed("/dev/ttyUSB0").unwrap();
+        let reconnected = manager
+            .reconnect_session(&opened.session_id)
+            .expect("session should reconnect");
+
+        assert_eq!(reconnected.session_id, opened.session_id);
+        assert_eq!(reconnected.state, SessionState::Connected);
+        assert_eq!(
+            manager.state(&reconnected.session_id).unwrap(),
+            SessionState::Connected
+        );
+    }
+
+    #[test]
     fn session_manager_polls_rx_with_sequence_timestamp_and_counter() {
         let mut manager = SessionManager::new(MockSerialBackend::with_rx(
             vec![mock_port("/dev/ttyUSB0", "Adapter A")],
@@ -1216,7 +1479,7 @@ mod tests {
     }
 
     #[test]
-    fn session_manager_mock_gate_connect_receive_transmit_disconnect() {
+    fn session_manager_mock_gate_connect_receive_transmit_disconnect_and_reconnect() {
         let mut manager = SessionManager::new(MockSerialBackend::with_rx(
             vec![mock_port("/dev/ttyUSB0", "Adapter A")],
             vec![vec![0x52, 0x58]],
@@ -1235,11 +1498,16 @@ mod tests {
                 bytes: vec![0x54, 0x58],
             })
             .expect("write should pass");
+        manager.mark_port_removed("/dev/ttyUSB0").unwrap();
+        let reconnected = manager
+            .reconnect_session(&opened.session_id)
+            .expect("session should reconnect");
         let closed = manager.close_session(&opened.session_id).unwrap();
 
         assert_eq!(rx_batch.rx_bytes, 2);
         assert_eq!(rx_batch.chunks[0].bytes, vec![0x52, 0x58]);
         assert_eq!(tx.tx_bytes, 2);
+        assert_eq!(reconnected.state, SessionState::Connected);
         assert_eq!(closed.state, SessionState::Disconnected);
     }
 

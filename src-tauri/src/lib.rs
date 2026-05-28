@@ -5,9 +5,10 @@ use config::{load_or_create_config, AppConfig, ConfigLoadResult};
 use serde::Serialize;
 use serial::{
     apply_config_to_builder, list_ports_with, transition, validate_serial_config,
-    CloseSessionResult, OpenSessionRequest, OpenSessionResult, RealSerialBackend, RxBatch,
-    SerialConfig, SerialConfigInput, SerialPortSummary, SessionEvent, SessionManager, SessionState,
-    WriteRequest, WriteResult, RX_BATCH_INTERVAL_MS,
+    CloseSessionResult, HotplugPollResult, OpenSessionRequest, OpenSessionResult,
+    RealSerialBackend, RxBatch, SerialConfig, SerialConfigInput, SerialPortSummary, SessionEvent,
+    SessionManager, SessionState, WriteRequest, WriteResult, HOTPLUG_POLL_INTERVAL_MS,
+    RX_BATCH_INTERVAL_MS,
 };
 use std::env;
 use std::path::PathBuf;
@@ -121,6 +122,23 @@ fn close_serial_session(
         .map_err(|_| "serial session manager lock poisoned".to_string())?
         .close_session(&session_id)
         .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+fn reconnect_serial_session(
+    app: tauri::AppHandle,
+    manager: tauri::State<'_, AppSessionManager>,
+    session_id: String,
+) -> Result<OpenSessionResult, String> {
+    let result = manager
+        .lock()
+        .map_err(|_| "serial session manager lock poisoned".to_string())?
+        .reconnect_session(&session_id)
+        .map_err(|error| error.to_string())?;
+
+    start_serial_rx_worker(manager.inner().clone(), app, result.session_id.clone())?;
+
+    Ok(result)
 }
 
 #[tauri::command]
@@ -255,6 +273,52 @@ fn start_serial_rx_worker(
     Ok(())
 }
 
+fn start_serial_hotplug_worker(manager: AppSessionManager, app: tauri::AppHandle) {
+    thread::spawn(move || {
+        let mut known_ports = manager
+            .lock()
+            .ok()
+            .and_then(|manager| manager.current_ports().ok())
+            .unwrap_or_default();
+
+        loop {
+            thread::sleep(Duration::from_millis(HOTPLUG_POLL_INTERVAL_MS));
+
+            let poll_result = {
+                let Ok(mut manager) = manager.lock() else {
+                    break;
+                };
+
+                match manager.poll_hotplug(&known_ports) {
+                    Ok(result) => result,
+                    Err(_) => continue,
+                }
+            };
+
+            known_ports = poll_result.ports.clone();
+
+            if !poll_result.changes.is_empty() {
+                let _ = emit_hotplug_poll_result(&app, &poll_result);
+            }
+        }
+    });
+}
+
+fn emit_hotplug_poll_result(
+    app: &tauri::AppHandle,
+    poll_result: &HotplugPollResult,
+) -> Result<(), String> {
+    app.emit("serial-port-list-changed", poll_result)
+        .map_err(|error| error.to_string())?;
+
+    for session_id in &poll_result.hot_unplugged_sessions {
+        app.emit("serial-session-hot-unplugged", session_id)
+            .map_err(|error| error.to_string())?;
+    }
+
+    Ok(())
+}
+
 fn emit_rx_batch(app: &tauri::AppHandle, batch: &RxBatch) -> Result<(), String> {
     if batch.chunks.is_empty() {
         return Ok(());
@@ -265,8 +329,15 @@ fn emit_rx_batch(app: &tauri::AppHandle, batch: &RxBatch) -> Result<(), String> 
 }
 
 pub fn run() {
+    let session_manager = Arc::new(Mutex::new(SessionManager::new(RealSerialBackend)));
+    let hotplug_manager = session_manager.clone();
+
     tauri::Builder::default()
-        .manage(Arc::new(Mutex::new(SessionManager::new(RealSerialBackend))))
+        .manage(session_manager)
+        .setup(move |app| {
+            start_serial_hotplug_worker(hotplug_manager.clone(), app.handle().clone());
+            Ok(())
+        })
         .invoke_handler(tauri::generate_handler![
             environment_info,
             build_metadata,
@@ -278,6 +349,7 @@ pub fn run() {
             next_session_state,
             open_serial_session,
             close_serial_session,
+            reconnect_serial_session,
             serial_write,
             serial_drain_rx,
             serial_session_state,
