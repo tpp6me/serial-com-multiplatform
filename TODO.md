@@ -72,8 +72,8 @@ Goal: prove high-risk assumptions before production implementation.
 - [x] `SPIKE-022` Send `Uint8Array` or equivalent binary payload to React. `serial-rx-batch` sends byte arrays in typed Tauri event payloads 2026-05-28.
 - [x] `SPIKE-023` Benchmark synthetic 100,000 chars/sec feed for 60 seconds. Automated model benchmark passed locally in 782 ms on 2026-05-28.
 - [x] `SPIKE-024` Verify frontend keeps terminal usable during synthetic feed. Playwright 60-second 100,000 chars/sec feed test passed 2026-05-28.
-- [!] `SPIKE-025` Benchmark 10 MB hardware loopback at 921600 baud. CP2102 `/dev/cu.SLAB_USBtoUART` attempt on 2026-05-28 wrote 10,485,760 bytes but received 5,038,589 before 180 s timeout.
-- [!] `SPIKE-026` Compare TX/RX SHA-256 for hardware loopback. CP2102 `/dev/cu.SLAB_USBtoUART` 921600 attempt failed SHA-256 match on 2026-05-28.
+- [!] `SPIKE-025` Benchmark 10 MB hardware loopback at 921600 baud. CP2102 `/dev/cu.SLAB_USBtoUART` rerun on 2026-05-29 wrote 10,485,760 bytes but received 10,483,862 before 180 s timeout.
+- [!] `SPIKE-026` Compare TX/RX SHA-256 for hardware loopback. CP2102 `/dev/cu.SLAB_USBtoUART` 921600 rerun failed SHA-256 match on 2026-05-29.
 - [x] `SPIKE-027` Record throughput results in docs. See `docs/spike-results.md`.
 
 ### 1.4 Hotplug Spike
@@ -106,7 +106,7 @@ Goal: prove high-risk assumptions before production implementation.
 
 ### 1.7 Phase 0 Exit Gate
 
-- [!] `GATE-000` Zero byte loss in 10 MB hardware loopback at 921600 baud on at least one supported OS. CP2102 macOS run did not meet the gate on 2026-05-28; rerun with another adapter/OS before release readiness.
+- [!] `GATE-000` Zero byte loss in 10 MB hardware loopback at 921600 baud on at least one supported OS. CP2102 macOS rerun did not meet the gate on 2026-05-29; rerun with another adapter/OS before release readiness.
 - [x] `GATE-001` Synthetic renderer feed passes 100,000 chars/sec target.
 - [!] `GATE-002` Hotplug updates under 2 seconds after OS event. CP2102 macOS run did not meet timing target on 2026-05-28.
 - [!] `GATE-003` Linux WebKitGTK rendering is acceptable. Requires Ubuntu/WebKitGTK environment; current work is on macOS.
@@ -820,7 +820,7 @@ Use this section to record completion of repeatable self-tests. Keep detailed lo
 - [x] `TEST-HW-005` Binary `00..FF` round-trip passes. `/dev/cu.SLAB_USBtoUART` passed 2026-05-28.
 - [x] `TEST-HW-006` 230400 baud loopback passes. CP2102 `/dev/cu.SLAB_USBtoUART` passed 2026-05-28 with 289-byte exact SHA-256 match.
 - [x] `TEST-HW-007` 460800 baud loopback passes. CP2102 `/dev/cu.SLAB_USBtoUART` passed 2026-05-28 with 289-byte exact SHA-256 match.
-- [!] `TEST-HW-008` 921600 baud 10 MB loopback SHA-256 passes. CP2102 `/dev/cu.SLAB_USBtoUART` attempt failed on 2026-05-28; wrote 10,485,760 bytes, received 5,038,589, SHA-256 mismatch.
+- [!] `TEST-HW-008` 921600 baud 10 MB loopback SHA-256 passes. CP2102 `/dev/cu.SLAB_USBtoUART` rerun failed on 2026-05-29; wrote 10,485,760 bytes, received 10,483,862, SHA-256 mismatch.
 - [x] `TEST-HW-009` Supported custom baud test passes. CP2102 `/dev/cu.SLAB_USBtoUART` passed 250000 baud on 2026-05-28 with 289-byte exact SHA-256 match.
 - [!] `TEST-HW-010` Hot-unplug during transfer passes. Requires someone present to unplug/replug during transfer.
 - [!] `TEST-HW-011` Reconnect after hot-unplug passes. Requires interactive hardware unplug/replug validation.
@@ -921,7 +921,7 @@ Use this section to record completion of repeatable self-tests. Keep detailed lo
 - [~] `TEST-RC-001` Full CI suite passes. Local typecheck, lint, format, and frontend tests pass; remote CI pass requires commit/push and hosted workflow result.
 - [!] `TEST-RC-002` Hardware matrix passes. Requires FTDI, CH340/CH341, and cross-OS hardware runs; current macOS inventory only shows CP2102.
 - [!] `TEST-RC-003` 8-hour 115200 baud soak test passes. Requires long-running hardware validation with a connected adapter.
-- [!] `TEST-RC-004` 1-hour 921600 baud high-rate test passes. Current CP2102 921600 10 MB run failed; requires another adapter/OS or further hardware investigation.
+- [!] `TEST-RC-004` 1-hour 921600 baud high-rate test passes. Current CP2102 921600 10 MB rerun failed; requires another adapter/OS or further hardware investigation.
 - [x] `TEST-RC-005` Crash reporting default OFF verified. Default config sets `crash_reporting_enabled: false` and settings model tests validate defaults.
 - [x] `TEST-RC-006` Crash report scrubber verified. `src/privacy/crashReportScrubber.test.ts` verifies redaction of serial payload fields, log fields, log paths, serial port paths, and usernames.
 - [x] `TEST-RC-007` No v1.1-only UI visible in v1.0. Source scan found no Python scripting, plugin marketplace, BLE UART, decoder, or headless UI strings in `src/` or E2E tests.

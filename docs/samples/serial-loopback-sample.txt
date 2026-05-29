@@ -1,0 +1,5 @@
+MultiSerial file send loopback sample
+Line 1: ASCII text
+Line 2: 0123456789
+Line 3: The quick brown fox jumps over the lazy dog.
+Line 4: END

@@ -65,6 +65,9 @@ describe("App", () => {
     expect(screen.getByRole("heading", { name: "MultiSerial" })).toBeInTheDocument();
     expect(screen.getByText("No terminal data received.")).toBeInTheDocument();
     expect(screen.getByText("Disconnected")).toBeInTheDocument();
+    expect(
+      within(screen.getByLabelText("Baud rate")).getByRole("option", { name: "921600" })
+    ).toBeInTheDocument();
   });
 
   it("focuses the terminal search field with Cmd+F", async () => {
@@ -119,7 +122,14 @@ describe("App", () => {
 
     fireEvent.click(await screen.findByRole("button", { name: "Refresh" }));
 
-    expect(await screen.findByText("USB Loopback")).toBeInTheDocument();
+    const portButton = await screen.findByRole("button", {
+      name: "Choose port USB Loopback"
+    });
+    expect(portButton).toBeInTheDocument();
+    fireEvent.click(portButton);
+
+    expect(screen.getByLabelText("Serial port")).toHaveValue("/dev/cu.usbserial-test");
+    expect(portButton).toHaveAttribute("aria-pressed", "true");
     expect(invokeMock).toHaveBeenCalledWith("list_serial_ports");
   });
 
@@ -158,7 +168,7 @@ describe("App", () => {
     expect(screen.queryByLabelText("Macro name")).not.toBeInTheDocument();
 
     fireEvent.keyDown(window, { key: "f", metaKey: true, shiftKey: true });
-    expect(screen.queryByLabelText("Search terminal")).not.toBeInTheDocument();
+    expect(screen.queryByLabelText("Inspector")).not.toBeInTheDocument();
 
     fireEvent.keyDown(window, { key: "s", metaKey: true, shiftKey: true });
     expect(screen.getAllByText("No terminal data is available to export.").length).toBeGreaterThan(
@@ -256,8 +266,7 @@ describe("App", () => {
 
     render(<App />);
 
-    await screen.findByText("USB Test");
-    fireEvent.change(screen.getByLabelText("Serial port"), { target: { value: "/dev/cu.test" } });
+    fireEvent.click(await screen.findByRole("button", { name: "Choose port USB Test" }));
     fireEvent.keyDown(window, { key: "k", metaKey: true });
 
     expect(await screen.findByRole("button", { name: "Disconnect" })).toBeInTheDocument();
@@ -272,8 +281,8 @@ describe("App", () => {
     });
     expect(await screen.findByText("session log ready")).toBeInTheDocument();
 
-    fireEvent.click(screen.getByRole("button", { name: "Open log file" }));
-    fireEvent.click(screen.getByRole("button", { name: "Open log directory" }));
+    fireEvent.click(screen.getByRole("button", { name: "Open file" }));
+    fireEvent.click(screen.getByRole("button", { name: "Open folder" }));
 
     await waitFor(() =>
       expect(invokeMock).toHaveBeenCalledWith("open_path", {
@@ -319,6 +328,7 @@ describe("App", () => {
     render(<App />);
 
     await screen.findByRole("button", { name: "Refresh" });
+    fireEvent.click(screen.getByRole("tab", { name: "Filters 0" }));
     fireEvent.change(screen.getByLabelText("Filter pattern"), { target: { value: "ERR" } });
     const filtersSection = screen
       .getAllByText("Filters")

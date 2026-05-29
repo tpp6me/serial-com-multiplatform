@@ -603,7 +603,63 @@ pub fn list_ports_with<B: SerialBackend>(
     let mut ports = backend.list_ports()?;
     ports.sort_by(|left, right| left.path.cmp(&right.path));
     ports.dedup_by(|left, right| left.path == right.path);
+    ports = prefer_macos_callout_ports(ports);
     Ok(ports)
+}
+
+fn prefer_macos_callout_ports(ports: Vec<SerialPortSummary>) -> Vec<SerialPortSummary> {
+    let mut preferred_by_key: HashMap<String, SerialPortSummary> = HashMap::new();
+
+    for port in ports {
+        let key = macos_port_identity_key(&port);
+
+        match preferred_by_key.get(&key) {
+            Some(existing) if macos_port_preference(existing) <= macos_port_preference(&port) => {}
+            _ => {
+                preferred_by_key.insert(key, port);
+            }
+        }
+    }
+
+    let mut ports = preferred_by_key.into_values().collect::<Vec<_>>();
+    ports.sort_by(|left, right| left.path.cmp(&right.path));
+    ports
+}
+
+fn macos_port_identity_key(port: &SerialPortSummary) -> String {
+    if let Some(name) = port.path.strip_prefix("/dev/cu.") {
+        return usb_identity_key(port).unwrap_or_else(|| format!("macos-device:{name}"));
+    }
+
+    if let Some(name) = port.path.strip_prefix("/dev/tty.") {
+        return usb_identity_key(port).unwrap_or_else(|| format!("macos-device:{name}"));
+    }
+
+    format!("path:{}", port.path)
+}
+
+fn usb_identity_key(port: &SerialPortSummary) -> Option<String> {
+    Some(format!(
+        "macos-usb:{:04X}:{:04X}:{}",
+        port.vid?,
+        port.pid?,
+        port.serial_number.as_ref()?
+    ))
+}
+
+fn macos_port_preference(port: &SerialPortSummary) -> (u8, u8, &str) {
+    let callout_rank = if port.path.starts_with("/dev/cu.") {
+        0
+    } else {
+        1
+    };
+    let generic_usbserial_rank = if port.path.contains(".usbserial-") {
+        1
+    } else {
+        0
+    };
+
+    (callout_rank, generic_usbserial_rank, port.path.as_str())
 }
 
 pub fn diff_port_lists(
@@ -1544,6 +1600,46 @@ mod tests {
         assert_eq!(ports.len(), 2);
         assert_eq!(ports[0].path, "/dev/ttyUSB0");
         assert_eq!(ports[1].path, "/dev/ttyUSB1");
+    }
+
+    #[test]
+    fn macos_port_list_prefers_callout_device_and_collapses_usb_aliases() {
+        let backend = MockSerialBackend::new(vec![
+            mock_unknown_port("/dev/tty.Bluetooth-Incoming-Port"),
+            mock_unknown_port("/dev/cu.Bluetooth-Incoming-Port"),
+            mock_port(
+                "/dev/tty.usbserial-0001",
+                "CP2102 USB to UART Bridge Controller",
+            ),
+            mock_port(
+                "/dev/cu.usbserial-0001",
+                "CP2102 USB to UART Bridge Controller",
+            ),
+            mock_port(
+                "/dev/tty.SLAB_USBtoUART",
+                "CP2102 USB to UART Bridge Controller",
+            ),
+            mock_port(
+                "/dev/cu.SLAB_USBtoUART",
+                "CP2102 USB to UART Bridge Controller",
+            ),
+            mock_port("/dev/ttyUSB0", "Linux Adapter"),
+        ]);
+
+        let ports = list_ports_with(&backend).expect("mock list should pass");
+        let paths = ports
+            .iter()
+            .map(|port| port.path.as_str())
+            .collect::<Vec<_>>();
+
+        assert_eq!(
+            paths,
+            vec![
+                "/dev/cu.Bluetooth-Incoming-Port",
+                "/dev/cu.SLAB_USBtoUART",
+                "/dev/ttyUSB0"
+            ]
+        );
     }
 
     #[test]
@@ -2500,6 +2596,19 @@ mod tests {
             manufacturer: Some("Silicon Labs".to_string()),
             product: Some(display_name.to_string()),
             port_type: "usb".to_string(),
+        }
+    }
+
+    fn mock_unknown_port(path: &str) -> SerialPortSummary {
+        SerialPortSummary {
+            path: path.to_string(),
+            display_name: path.to_string(),
+            vid: None,
+            pid: None,
+            serial_number: None,
+            manufacturer: None,
+            product: None,
+            port_type: "unknown".to_string(),
         }
     }
 

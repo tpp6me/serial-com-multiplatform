@@ -12,6 +12,7 @@
     "allow-save-config",
     "allow-default-config",
     "allow-open-path",
+    "allow-write-text-file",
     "allow-list-serial-ports",
     "allow-validate-serial-settings",
     "allow-validate-backend-serial-settings",

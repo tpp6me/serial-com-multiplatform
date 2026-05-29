@@ -15,7 +15,7 @@ Date: 2026-05-28
 - CP2102 loopback on `/dev/cu.SLAB_USBtoUART` passed at 115200 8N1 on macOS. The check wrote 289 bytes, including `00..FF`, and read back an exact match.
 - After unplug/reconnect, CP2102 loopback on `/dev/cu.SLAB_USBtoUART` passed again at 115200 8N1 on 2026-05-28. The Rust hardware test wrote 289 bytes, received 289 bytes, and matched SHA-256 `1696f90eae74d17b61a467cc255b1213ca9f01906f629668480800cebee95136`.
 - CP2102 loopback on `/dev/cu.SLAB_USBtoUART` passed 230400, 460800, and custom 250000 baud on 2026-05-28. Each run wrote 289 bytes, received 289 bytes, and matched SHA-256 `1696f90eae74d17b61a467cc255b1213ca9f01906f629668480800cebee95136`.
-- CP2102 loopback on `/dev/cu.SLAB_USBtoUART` did not pass the 921600 baud 10 MB gate. The Rust `serialport-rs` hardware test wrote 10,485,760 bytes, received 5,038,589 bytes before the 180 s timeout, and the received SHA-256 did not match.
+- CP2102 loopback on `/dev/cu.SLAB_USBtoUART` did not pass the 921600 baud 10 MB gate. The 2026-05-29 Rust hardware rerun wrote 10,485,760 bytes, received 10,483,862 bytes before the 180 s timeout, and the received SHA-256 did not match.
 
 ## RX Throughput
 

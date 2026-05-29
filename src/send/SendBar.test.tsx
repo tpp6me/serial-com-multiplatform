@@ -162,4 +162,17 @@ describe("SendBar", () => {
     expect(screen.getByLabelText("File send progress")).toHaveValue(50);
     expect(onCancelFileSend).toHaveBeenCalledTimes(1);
   });
+
+  it("allows choosing a file before a serial connection is active", () => {
+    const onFileSelected = vi.fn();
+    const file = new File([Uint8Array.of(0x41)], "payload.bin");
+
+    renderSendBar({ disabled: true, onFileSelected, selectedFileName: "payload.bin" });
+
+    fireEvent.change(screen.getByLabelText("Choose file to send"), { target: { files: [file] } });
+
+    expect(onFileSelected).toHaveBeenCalledWith(file);
+    expect(screen.getByRole("button", { name: "Choose file" })).not.toBeDisabled();
+    expect(screen.getByRole("button", { name: "Send file" })).toBeDisabled();
+  });
 });

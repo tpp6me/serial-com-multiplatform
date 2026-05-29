@@ -41,14 +41,15 @@ test("terminal remains usable during a 100,000 chars/sec synthetic feed", async 
   await page.keyboard.press(process.platform === "darwin" ? "Meta+F" : "Control+F");
   await expect(page.getByLabel("Search terminal")).toBeFocused();
   await page.getByLabel("Search terminal").fill("ABC");
-  await expect(page.getByLabel("Filters and search")).toContainText(/\d+\/\d+/, {
+  await expect(page.getByLabel("Terminal search")).toContainText(/\d+\/\d+/, {
     timeout: 10_000
   });
 
+  await page.getByRole("tab", { name: /Highlights/ }).click();
   await page.getByLabel("Highlight pattern").fill("XYZ");
-  await page.getByRole("button", { name: "Add" }).nth(0).click();
+  await page.getByLabel("Inspector").getByRole("button", { name: "Add" }).click();
   await expect(
-    page.getByLabel("Filters and search").locator(".rule-item").filter({ hasText: "XYZ" })
+    page.getByLabel("Inspector").locator(".rule-item").filter({ hasText: "XYZ" })
   ).toBeVisible();
 
   const result = await page.evaluate(() => {

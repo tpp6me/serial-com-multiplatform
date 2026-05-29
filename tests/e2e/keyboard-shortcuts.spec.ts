@@ -19,7 +19,7 @@ test("global keyboard shortcuts route to visible app actions", async ({ page }) 
   await expect(page.getByLabel("Macros")).toHaveCount(0);
 
   await page.keyboard.press("Control+Shift+F");
-  await expect(page.getByLabel("Search terminal")).toHaveCount(0);
+  await expect(page.getByLabel("Inspector")).toHaveCount(0);
 
   await page.keyboard.press("Control+W");
   await expect(page.getByRole("button", { name: "Session 2", exact: true })).toHaveCount(0);

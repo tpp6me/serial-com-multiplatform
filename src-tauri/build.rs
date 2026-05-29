@@ -7,6 +7,7 @@ const APP_COMMANDS: &[&str] = &[
     "save_config",
     "default_config",
     "open_path",
+    "write_text_file",
     "list_serial_ports",
     "validate_serial_settings",
     "validate_backend_serial_settings",

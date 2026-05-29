@@ -7,7 +7,7 @@ use logging::{
     AutoLogRequest, LogFormat, LogRotationConfig, LogStatus, LogWriter, LogWriterOptions,
     StartLogRequest, StopLogRequest, StopLogResult,
 };
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use serial::{
     apply_config_to_builder, list_ports_with, transition, validate_serial_config,
     CloseSessionResult, HotplugPollResult, OpenSessionRequest, OpenSessionResult,
@@ -53,6 +53,19 @@ struct BuildMetadata {
 struct OpenPathRequest {
     path: String,
     kind: OpenPathKind,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct WriteTextFileRequest {
+    path: String,
+    contents: String,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct WriteTextFileResult {
+    path: String,
 }
 
 #[derive(Debug, serde::Deserialize, PartialEq, Eq)]
@@ -104,6 +117,21 @@ fn default_config() -> AppConfig {
 fn open_path(request: OpenPathRequest) -> Result<(), String> {
     let target = resolve_open_target(&request).map_err(|error| error.to_string())?;
     open_platform_path(&target).map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+fn write_text_file(request: WriteTextFileRequest) -> Result<WriteTextFileResult, String> {
+    let path = expand_tilde_path(&request.path);
+
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent).map_err(|error| error.to_string())?;
+    }
+
+    fs::write(&path, request.contents).map_err(|error| error.to_string())?;
+
+    Ok(WriteTextFileResult {
+        path: path.display().to_string(),
+    })
 }
 
 #[tauri::command]
@@ -716,6 +744,7 @@ pub fn run() {
             save_config,
             default_config,
             open_path,
+            write_text_file,
             list_serial_ports,
             validate_serial_settings,
             validate_backend_serial_settings,

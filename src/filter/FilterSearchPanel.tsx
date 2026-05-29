@@ -31,6 +31,8 @@ export type FilterSearchPanelProps = {
   searchMode: MatchMode;
   searchMatchCount: number;
   activeSearchIndex: number;
+  showSearch?: boolean;
+  sections?: Array<"profiles" | "highlights" | "filters">;
   searchInputRef?: RefObject<HTMLInputElement>;
   onAddHighlightRule: (rule: Omit<HighlightRule, "id" | "enabled">) => void;
   onToggleHighlightRule: (ruleId: string, enabled: boolean) => void;
@@ -68,6 +70,8 @@ export function FilterSearchPanel({
   searchMode,
   searchMatchCount,
   activeSearchIndex,
+  showSearch = true,
+  sections = ["profiles", "highlights", "filters"],
   searchInputRef,
   onAddHighlightRule,
   onToggleHighlightRule,
@@ -98,183 +102,191 @@ export function FilterSearchPanel({
 
   return (
     <section className="filter-panel" aria-label="Filters and search">
-      <div className="filter-section">
-        <h2>Search</h2>
-        <div className="search-row">
-          <input
-            ref={searchInputRef}
-            aria-label="Search terminal"
-            value={searchQuery}
-            onChange={(event) => onSearchQueryChange(event.currentTarget.value)}
-          />
-          <select
-            aria-label="Search mode"
-            value={searchMode}
-            onChange={(event) => onSearchModeChange(event.currentTarget.value as MatchMode)}
-          >
-            <option value="keyword">Text</option>
-            <option value="regex">Regex</option>
-          </select>
-        </div>
-        <div className="search-row">
-          <button type="button" onClick={onSearchPrevious} disabled={searchMatchCount === 0}>
-            Prev
-          </button>
-          <button type="button" onClick={onSearchNext} disabled={searchMatchCount === 0}>
-            Next
-          </button>
-          <span className="filter-meta">
-            {activeSearchPosition}/{searchMatchCount}
-          </span>
-        </div>
-      </div>
-
-      <div className="filter-section">
-        <h2>Profiles</h2>
-        <div className="profile-draft">
-          <input
-            aria-label="Profile name"
-            value={profileName}
-            onChange={(event) => setProfileName(event.currentTarget.value)}
-          />
-          <button
-            type="button"
-            onClick={() => {
-              onSaveFilterProfile(profileName);
-              setProfileName("");
-            }}
-            disabled={!canSaveProfile}
-          >
-            Save
-          </button>
-        </div>
-        {filterProfiles.length === 0 ? (
-          <p className="rule-empty">No saved profiles</p>
-        ) : (
-          <div className="profile-list">
-            {filterProfiles.map((profile) => (
-              <div className="profile-item" key={profile.id}>
-                <span>{profile.name}</span>
-                <button type="button" onClick={() => onApplyFilterProfile(profile.id)}>
-                  Apply
-                </button>
-                <button type="button" onClick={() => onDeleteFilterProfile(profile.id)}>
-                  Delete
-                </button>
-              </div>
-            ))}
+      {showSearch ? (
+        <div className="filter-section">
+          <h2>Search</h2>
+          <div className="search-row">
+            <input
+              ref={searchInputRef}
+              aria-label="Search terminal"
+              value={searchQuery}
+              onChange={(event) => onSearchQueryChange(event.currentTarget.value)}
+            />
+            <select
+              aria-label="Search mode"
+              value={searchMode}
+              onChange={(event) => onSearchModeChange(event.currentTarget.value as MatchMode)}
+            >
+              <option value="keyword">Text</option>
+              <option value="regex">Regex</option>
+            </select>
           </div>
-        )}
-      </div>
-
-      <div className="filter-section">
-        <h2>Highlights</h2>
-        <div className="rule-draft">
-          <input
-            aria-label="Highlight pattern"
-            value={highlightDraft.pattern}
-            maxLength={MAX_PATTERN_LENGTH + 1}
-            onChange={(event) =>
-              setHighlightDraft({ ...highlightDraft, pattern: event.currentTarget.value })
-            }
-          />
-          <select
-            aria-label="Highlight mode"
-            value={highlightDraft.mode}
-            onChange={(event) =>
-              setHighlightDraft({
-                ...highlightDraft,
-                mode: event.currentTarget.value as MatchMode
-              })
-            }
-          >
-            <option value="keyword">Text</option>
-            <option value="regex">Regex</option>
-          </select>
-          <input
-            aria-label="Highlight color"
-            type="color"
-            value={highlightDraft.color}
-            onChange={(event) =>
-              setHighlightDraft({ ...highlightDraft, color: event.currentTarget.value })
-            }
-          />
-          <button
-            type="button"
-            onClick={() => {
-              onAddHighlightRule(highlightDraft);
-              setHighlightDraft(defaultHighlightDraft);
-            }}
-            disabled={!canAddHighlight}
-          >
-            Add
-          </button>
+          <div className="search-row">
+            <button type="button" onClick={onSearchPrevious} disabled={searchMatchCount === 0}>
+              Prev
+            </button>
+            <button type="button" onClick={onSearchNext} disabled={searchMatchCount === 0}>
+              Next
+            </button>
+            <span className="filter-meta">
+              {activeSearchPosition}/{searchMatchCount}
+            </span>
+          </div>
         </div>
-        <RuleList
-          rules={highlightRules}
-          warnings={warnings}
-          emptyText="No highlight rules"
-          onToggle={onToggleHighlightRule}
-          onDelete={onDeleteHighlightRule}
-        />
-      </div>
+      ) : null}
 
-      <div className="filter-section">
-        <h2>Filters</h2>
-        <div className="rule-draft">
-          <input
-            aria-label="Filter pattern"
-            value={filterDraft.pattern}
-            maxLength={MAX_PATTERN_LENGTH + 1}
-            onChange={(event) =>
-              setFilterDraft({ ...filterDraft, pattern: event.currentTarget.value })
-            }
-          />
-          <select
-            aria-label="Filter action"
-            value={filterDraft.action}
-            onChange={(event) =>
-              setFilterDraft({
-                ...filterDraft,
-                action: event.currentTarget.value as FilterAction
-              })
-            }
-          >
-            <option value="show">Show</option>
-            <option value="suppress">Suppress</option>
-          </select>
-          <select
-            aria-label="Filter mode"
-            value={filterDraft.mode}
-            onChange={(event) =>
-              setFilterDraft({
-                ...filterDraft,
-                mode: event.currentTarget.value as MatchMode
-              })
-            }
-          >
-            <option value="keyword">Text</option>
-            <option value="regex">Regex</option>
-          </select>
-          <button
-            type="button"
-            onClick={() => {
-              onAddFilterRule(filterDraft);
-              setFilterDraft(defaultFilterDraft);
-            }}
-            disabled={!canAddFilter}
-          >
-            Add
-          </button>
+      {sections.includes("profiles") ? (
+        <div className="filter-section">
+          <h2>Profiles</h2>
+          <div className="profile-draft">
+            <input
+              aria-label="Profile name"
+              value={profileName}
+              onChange={(event) => setProfileName(event.currentTarget.value)}
+            />
+            <button
+              type="button"
+              onClick={() => {
+                onSaveFilterProfile(profileName);
+                setProfileName("");
+              }}
+              disabled={!canSaveProfile}
+            >
+              Save
+            </button>
+          </div>
+          {filterProfiles.length === 0 ? (
+            <p className="rule-empty">No saved profiles</p>
+          ) : (
+            <div className="profile-list">
+              {filterProfiles.map((profile) => (
+                <div className="profile-item" key={profile.id}>
+                  <span>{profile.name}</span>
+                  <button type="button" onClick={() => onApplyFilterProfile(profile.id)}>
+                    Apply
+                  </button>
+                  <button type="button" onClick={() => onDeleteFilterProfile(profile.id)}>
+                    Delete
+                  </button>
+                </div>
+              ))}
+            </div>
+          )}
         </div>
-        <RuleList
-          rules={filterRules}
-          warnings={warnings}
-          emptyText="No filter rules"
-          onToggle={onToggleFilterRule}
-          onDelete={onDeleteFilterRule}
-        />
-      </div>
+      ) : null}
+
+      {sections.includes("highlights") ? (
+        <div className="filter-section">
+          <h2>Highlights</h2>
+          <div className="rule-draft">
+            <input
+              aria-label="Highlight pattern"
+              value={highlightDraft.pattern}
+              maxLength={MAX_PATTERN_LENGTH + 1}
+              onChange={(event) =>
+                setHighlightDraft({ ...highlightDraft, pattern: event.currentTarget.value })
+              }
+            />
+            <select
+              aria-label="Highlight mode"
+              value={highlightDraft.mode}
+              onChange={(event) =>
+                setHighlightDraft({
+                  ...highlightDraft,
+                  mode: event.currentTarget.value as MatchMode
+                })
+              }
+            >
+              <option value="keyword">Text</option>
+              <option value="regex">Regex</option>
+            </select>
+            <input
+              aria-label="Highlight color"
+              type="color"
+              value={highlightDraft.color}
+              onChange={(event) =>
+                setHighlightDraft({ ...highlightDraft, color: event.currentTarget.value })
+              }
+            />
+            <button
+              type="button"
+              onClick={() => {
+                onAddHighlightRule(highlightDraft);
+                setHighlightDraft(defaultHighlightDraft);
+              }}
+              disabled={!canAddHighlight}
+            >
+              Add
+            </button>
+          </div>
+          <RuleList
+            rules={highlightRules}
+            warnings={warnings}
+            emptyText="No highlight rules"
+            onToggle={onToggleHighlightRule}
+            onDelete={onDeleteHighlightRule}
+          />
+        </div>
+      ) : null}
+
+      {sections.includes("filters") ? (
+        <div className="filter-section">
+          <h2>Filters</h2>
+          <div className="rule-draft">
+            <input
+              aria-label="Filter pattern"
+              value={filterDraft.pattern}
+              maxLength={MAX_PATTERN_LENGTH + 1}
+              onChange={(event) =>
+                setFilterDraft({ ...filterDraft, pattern: event.currentTarget.value })
+              }
+            />
+            <select
+              aria-label="Filter action"
+              value={filterDraft.action}
+              onChange={(event) =>
+                setFilterDraft({
+                  ...filterDraft,
+                  action: event.currentTarget.value as FilterAction
+                })
+              }
+            >
+              <option value="show">Show</option>
+              <option value="suppress">Suppress</option>
+            </select>
+            <select
+              aria-label="Filter mode"
+              value={filterDraft.mode}
+              onChange={(event) =>
+                setFilterDraft({
+                  ...filterDraft,
+                  mode: event.currentTarget.value as MatchMode
+                })
+              }
+            >
+              <option value="keyword">Text</option>
+              <option value="regex">Regex</option>
+            </select>
+            <button
+              type="button"
+              onClick={() => {
+                onAddFilterRule(filterDraft);
+                setFilterDraft(defaultFilterDraft);
+              }}
+              disabled={!canAddFilter}
+            >
+              Add
+            </button>
+          </div>
+          <RuleList
+            rules={filterRules}
+            warnings={warnings}
+            emptyText="No filter rules"
+            onToggle={onToggleFilterRule}
+            onDelete={onDeleteFilterRule}
+          />
+        </div>
+      ) : null}
     </section>
   );
 }

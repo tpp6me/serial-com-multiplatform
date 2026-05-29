@@ -1,4 +1,4 @@
-import type { KeyboardEvent } from "react";
+import { useRef, type KeyboardEvent } from "react";
 import { LINE_ENDINGS, type LineEnding, type SendMode } from "./sendModel";
 
 export type SendBarProps = {
@@ -46,6 +46,8 @@ export function SendBar({
   onSendFile,
   onCancelFileSend
 }: SendBarProps) {
+  const fileInputRef = useRef<HTMLInputElement | null>(null);
+
   const handleKeyDown = (event: KeyboardEvent<HTMLTextAreaElement>) => {
     if (event.key === "ArrowUp" && !event.shiftKey && !event.metaKey && !event.ctrlKey) {
       event.preventDefault();
@@ -121,12 +123,21 @@ export function SendBar({
         {sending ? "Sending" : "Send"}
       </button>
       <div className="file-send-controls">
+        <span className="file-label">File</span>
+        <button
+          type="button"
+          onClick={() => fileInputRef.current?.click()}
+          disabled={sending || fileSending}
+        >
+          Choose file
+        </button>
         <label className="file-picker">
-          File
+          <span className="visually-hidden">Choose file to send</span>
           <input
+            ref={fileInputRef}
             aria-label="Choose file to send"
             type="file"
-            disabled={disabled || sending || fileSending}
+            disabled={sending || fileSending}
             onChange={(event) => onFileSelected(event.currentTarget.files?.[0] ?? null)}
           />
         </label>

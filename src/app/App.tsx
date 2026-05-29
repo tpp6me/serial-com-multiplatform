@@ -1,4 +1,12 @@
-import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties } from "react";
+import {
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  type CSSProperties,
+  type PointerEvent as ReactPointerEvent
+} from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import {
@@ -127,6 +135,29 @@ type PortListChangedEvent = {
   ports: SerialPortSummary[];
 };
 
+function formatPortUsbId(port: SerialPortSummary) {
+  if (port.vid === null || port.pid === null) {
+    return null;
+  }
+
+  return `VID:PID ${port.vid.toString(16).padStart(4, "0").toUpperCase()}:${port.pid
+    .toString(16)
+    .padStart(4, "0")
+    .toUpperCase()}`;
+}
+
+function formatPortMetadata(port: SerialPortSummary) {
+  return [
+    port.manufacturer,
+    port.product,
+    port.serialNumber ? `S/N ${port.serialNumber}` : null,
+    formatPortUsbId(port),
+    port.portType
+  ]
+    .filter((value): value is string => Boolean(value))
+    .join(" | ");
+}
+
 type SerialWriteResult = {
   sessionId: string;
   bytesWritten: number;
@@ -173,6 +204,10 @@ type LogStatus = {
   error: string | null;
 };
 
+type WriteTextFileResult = {
+  path: string;
+};
+
 type SyntheticFeedOptions = {
   sessionId?: string;
   bytesPerSecond: number;
@@ -190,6 +225,13 @@ type TabConnectionSettings = {
   portPath: string;
   baudRate: string;
 };
+
+type LayoutSizes = {
+  leftPaneWidth: number;
+  rightPaneWidth: number;
+};
+
+type InspectorTab = "filters" | "highlights" | "profiles" | "logs";
 
 const fallbackEnvironment: EnvironmentInfo = {
   appName: "MultiSerial",
@@ -211,6 +253,17 @@ const emptyMacroDraft: MacroDraft = {
 
 const browserPreviewSessionId = import.meta.env.MULTISERIAL_E2E_SESSION_ID;
 let ruleCounter = 1;
+const STANDARD_BAUD_RATES = [
+  300, 1200, 2400, 4800, 9600, 14400, 19200, 38400, 57600, 115200, 128000, 230400, 250000, 256000,
+  460800, 500000, 576000, 921600, 1000000, 1500000, 2000000, 3000000, 4000000
+];
+const LAYOUT_STORAGE_KEY = "multiserial-layout-v1";
+const LEFT_PANE_DEFAULT_PX = 300;
+const LEFT_PANE_MIN_PX = 240;
+const LEFT_PANE_MAX_PX = 460;
+const RIGHT_PANE_DEFAULT_PX = 360;
+const RIGHT_PANE_MIN_PX = 280;
+const RIGHT_PANE_MAX_PX = 560;
 
 declare global {
   interface Window {
@@ -258,8 +311,13 @@ export function App() {
   const [shortcutBindings, setShortcutBindings] = useState<ShortcutBindings>(() =>
     loadShortcutBindings(browserStorage())
   );
+  const [showPortsPanel, setShowPortsPanel] = useState(true);
   const [showMacrosPanel, setShowMacrosPanel] = useState(true);
   const [showFiltersPanel, setShowFiltersPanel] = useState(true);
+  const [inspectorTab, setInspectorTab] = useState<InspectorTab>("logs");
+  const [layoutSizes, setLayoutSizes] = useState<LayoutSizes>(() =>
+    loadLayoutSizes(browserStorage())
+  );
   const [sessionTabs, setSessionTabs] = useState<SessionTabSnapshot>(() =>
     sessionTabStoreRef.current.snapshot()
   );
@@ -277,6 +335,8 @@ export function App() {
   const [statusBanner, setStatusBanner] = useState<StatusBanner | null>(null);
   const [updateState, setUpdateState] = useState<UpdateCheckState>({ status: "idle" });
   const [logStatus, setLogStatus] = useState<LogStatus | null>(null);
+  const [lastExportPath, setLastExportPath] = useState<string | null>(null);
+  const [logActionBusy, setLogActionBusy] = useState(false);
   const [sending, setSending] = useState(false);
   const [historyCursor, setHistoryCursor] = useState<number | null>(null);
   const [selectedFile, setSelectedFile] = useState<File | null>(null);
@@ -305,7 +365,9 @@ export function App() {
     connectionSettingsByTab[sessionTabs.activeTabId] ?? defaultConnectionSettings(appSettings);
   const appStyle = {
     "--terminal-font-family": appSettings.display.fontFamily,
-    "--terminal-font-size": `${appSettings.display.fontSize}px`
+    "--terminal-font-size": `${appSettings.display.fontSize}px`,
+    "--left-pane-width": `${layoutSizes.leftPaneWidth}px`,
+    "--right-pane-width": `${layoutSizes.rightPaneWidth}px`
   } as CSSProperties;
   const highlightRules = useMemo(
     () => highlightRulesByTab[sessionTabs.activeTabId] ?? [],
@@ -971,7 +1033,7 @@ export function App() {
     }
   };
 
-  const exportTerminalBuffer = useCallback(() => {
+  const exportTerminalBuffer = useCallback(async () => {
     if (filteredTerminalLines.length === 0) {
       setSendError("No terminal data is available to export.");
       return;
@@ -985,16 +1047,20 @@ export function App() {
           }`
       )
       .join("\n")}\n`;
-    const blob = new Blob([payload], { type: "text/plain;charset=utf-8" });
-    const url = URL.createObjectURL(blob);
-    const link = document.createElement("a");
-    link.href = url;
-    link.download = `${safeDownloadName(sessionTabs.activeTab.title)}.txt`;
-    link.click();
-    URL.revokeObjectURL(url);
-  }, [filteredTerminalLines, sessionTabs.activeTab.title]);
+    const path = exportFilePath(appSettings, environment, sessionTabs.activeTab.title, "txt");
 
-  const exportTerminalHtml = useCallback(() => {
+    try {
+      const result = await invoke<WriteTextFileResult>("write_text_file", {
+        request: { path, contents: payload }
+      });
+      setLastExportPath(result.path);
+      setStatusBanner({ kind: "info", message: `Exported text to ${result.path}` });
+    } catch (error) {
+      setSendError(error instanceof Error ? error.message : String(error));
+    }
+  }, [appSettings, environment, filteredTerminalLines, sessionTabs.activeTab.title]);
+
+  const exportTerminalHtml = useCallback(async () => {
     if (filteredTerminalLines.length === 0) {
       setSendError("No terminal data is available to export.");
       return;
@@ -1011,14 +1077,67 @@ export function App() {
     const payload = `<!doctype html><html><head><meta charset="utf-8"><title>${escapeHtml(
       sessionTabs.activeTab.title
     )}</title><style>body{font-family:system-ui,sans-serif}table{border-collapse:collapse;width:100%}td,th{border:1px solid #ccd4dd;padding:4px 6px;text-align:left;vertical-align:top}pre{margin:0;white-space:pre-wrap;overflow-wrap:anywhere}</style></head><body><table><thead><tr><th>Timestamp</th><th>Direction</th><th>Data</th></tr></thead><tbody>${rows}</tbody></table></body></html>`;
-    const blob = new Blob([payload], { type: "text/html;charset=utf-8" });
-    const url = URL.createObjectURL(blob);
-    const link = document.createElement("a");
-    link.href = url;
-    link.download = `${safeDownloadName(sessionTabs.activeTab.title)}.html`;
-    link.click();
-    URL.revokeObjectURL(url);
-  }, [filteredTerminalLines, sessionTabs.activeTab.title]);
+    const path = exportFilePath(appSettings, environment, sessionTabs.activeTab.title, "html");
+
+    try {
+      const result = await invoke<WriteTextFileResult>("write_text_file", {
+        request: { path, contents: payload }
+      });
+      setLastExportPath(result.path);
+      setStatusBanner({ kind: "info", message: `Exported HTML to ${result.path}` });
+    } catch (error) {
+      setSendError(error instanceof Error ? error.message : String(error));
+    }
+  }, [appSettings, environment, filteredTerminalLines, sessionTabs.activeTab.title]);
+
+  const startActiveLog = async () => {
+    const sessionId = activeTerminalSessionIdRef.current;
+
+    if (!sessionId) {
+      setSendError("Connect a session before starting a log.");
+      return;
+    }
+
+    setLogActionBusy(true);
+    try {
+      const request = {
+        sessionId,
+        ...buildAutoLogRequest(
+          appSettings,
+          activeConnectionSettings.portPath || sessionTabs.activeTab.title
+        )
+      };
+      const status = await invoke<LogStatus>("serial_start_log", { request });
+      setLogStatus(status);
+      setStatusBanner({ kind: "info", message: `Started log at ${status.path ?? request.path}` });
+    } catch (error) {
+      setSendError(error instanceof Error ? error.message : String(error));
+    } finally {
+      setLogActionBusy(false);
+    }
+  };
+
+  const stopActiveLog = async () => {
+    const sessionId = activeTerminalSessionIdRef.current;
+
+    if (!sessionId) {
+      setSendError("No active session is available.");
+      return;
+    }
+
+    setLogActionBusy(true);
+    try {
+      const result = await invoke<{ status: LogStatus }>("serial_stop_log", {
+        request: { sessionId }
+      });
+      setLogStatus(result.status);
+      setStatusBanner({ kind: "info", message: "Stopped session log." });
+    } catch (error) {
+      setSendError(error instanceof Error ? error.message : String(error));
+    } finally {
+      setLogActionBusy(false);
+    }
+  };
 
   const openLogFile = async () => {
     if (!logStatus?.path) {
@@ -1037,6 +1156,15 @@ export function App() {
     await openPath(directory, "directory", "Opened log directory.");
   };
 
+  const openLastExport = async () => {
+    if (!lastExportPath) {
+      setSendError("No exported file is available to open.");
+      return;
+    }
+
+    await openPath(lastExportPath, "file", "Opened exported file.");
+  };
+
   const openPath = async (path: string, kind: "file" | "directory", successMessage: string) => {
     try {
       await invoke("open_path", { request: { path, kind } });
@@ -1045,6 +1173,33 @@ export function App() {
       setSendError(error instanceof Error ? error.message : String(error));
     }
   };
+
+  const updateLayoutSize = useCallback(
+    (pane: keyof LayoutSizes, value: number) => {
+      setLayoutSizes((current) => {
+        const next = {
+          ...current,
+          [pane]:
+            pane === "leftPaneWidth"
+              ? clamp(value, LEFT_PANE_MIN_PX, LEFT_PANE_MAX_PX)
+              : clamp(value, RIGHT_PANE_MIN_PX, RIGHT_PANE_MAX_PX)
+        };
+        saveLayoutSizes(browserStorage(), next);
+        return next;
+      });
+    },
+    [setLayoutSizes]
+  );
+
+  const resetLayoutSize = useCallback(
+    (pane: keyof LayoutSizes) => {
+      updateLayoutSize(
+        pane,
+        pane === "leftPaneWidth" ? LEFT_PANE_DEFAULT_PX : RIGHT_PANE_DEFAULT_PX
+      );
+    },
+    [updateLayoutSize]
+  );
 
   const sendCurrentInput = async () => {
     const sessionId = activeTerminalSessionIdRef.current;
@@ -1408,7 +1563,7 @@ export function App() {
         !isEditableShortcutTarget(event.target)
       ) {
         event.preventDefault();
-        exportTerminalBuffer();
+        void exportTerminalBuffer();
         return;
       }
 
@@ -1697,9 +1852,18 @@ export function App() {
         </button>
       </nav>
 
-      <section className="workspace" aria-label="Terminal workspace">
+      <section
+        className={showFiltersPanel ? "workspace inspector-open" : "workspace"}
+        aria-label="Terminal workspace"
+      >
         <aside className="sidebar">
-          <button type="button">Ports</button>
+          <button
+            type="button"
+            aria-pressed={showPortsPanel}
+            onClick={() => setShowPortsPanel((visible) => !visible)}
+          >
+            Ports
+          </button>
           <button
             type="button"
             aria-pressed={showMacrosPanel}
@@ -1712,8 +1876,52 @@ export function App() {
             aria-pressed={showFiltersPanel}
             onClick={() => setShowFiltersPanel((visible) => !visible)}
           >
-            Filters
+            Inspector
           </button>
+          {showPortsPanel ? (
+            <section className="port-panel" aria-label="Available ports">
+              <div className="port-panel-header">
+                <h2>Available ports</h2>
+                <button
+                  type="button"
+                  onClick={() => {
+                    refreshPorts().catch(() => {
+                      // Error state is handled in refreshPorts.
+                    });
+                  }}
+                  disabled={portsRefreshing}
+                  aria-busy={portsRefreshing}
+                >
+                  {portsRefreshing ? "Scanning" : "Scan"}
+                </button>
+              </div>
+              {ports.length === 0 ? (
+                <p className="port-empty">No serial ports found.</p>
+              ) : (
+                <div className="port-list">
+                  {ports.map((port) => {
+                    const selected = activeConnectionSettings.portPath === port.path;
+                    const metadata = formatPortMetadata(port);
+
+                    return (
+                      <button
+                        type="button"
+                        className="port-item"
+                        aria-pressed={selected}
+                        aria-label={`Choose port ${port.displayName}`}
+                        key={port.path}
+                        onClick={() => updateActiveConnectionSettings({ portPath: port.path })}
+                      >
+                        <span className="port-name">{port.displayName}</span>
+                        <span className="port-path">{port.path}</span>
+                        {metadata ? <span className="port-meta">{metadata}</span> : null}
+                      </button>
+                    );
+                  })}
+                </div>
+              )}
+            </section>
+          ) : null}
           {showMacrosPanel ? (
             <MacroPanel
               macros={macros}
@@ -1734,78 +1942,196 @@ export function App() {
               onStopAllAutomations={stopAutomation}
             />
           ) : null}
-          {showFiltersPanel ? (
-            <FilterSearchPanel
-              highlightRules={highlightRules}
-              filterRules={filterRules}
-              filterProfiles={filterProfiles}
-              warnings={filterWarnings}
-              searchQuery={searchQuery}
-              searchMode={searchMode}
-              searchMatchCount={searchResult.matches.length}
-              activeSearchIndex={searchResult.activeIndex}
-              searchInputRef={searchInputRef}
-              onAddHighlightRule={addHighlightRule}
-              onToggleHighlightRule={(ruleId, enabled) =>
-                updateActiveHighlightRules((rules) =>
-                  rules.map((rule) => (rule.id === ruleId ? { ...rule, enabled } : rule))
-                )
-              }
-              onDeleteHighlightRule={(ruleId) =>
-                updateActiveHighlightRules((rules) => rules.filter((rule) => rule.id !== ruleId))
-              }
-              onAddFilterRule={addFilterRule}
-              onToggleFilterRule={(ruleId, enabled) =>
-                updateActiveFilterRules((rules) =>
-                  rules.map((rule) => (rule.id === ruleId ? { ...rule, enabled } : rule))
-                )
-              }
-              onDeleteFilterRule={(ruleId) =>
-                updateActiveFilterRules((rules) => rules.filter((rule) => rule.id !== ruleId))
-              }
-              onSaveFilterProfile={saveFilterProfile}
-              onApplyFilterProfile={applyFilterProfile}
-              onDeleteFilterProfile={deleteFilterProfile}
-              onSearchQueryChange={(query) => {
-                setSearchQuery(query);
+        </aside>
+        <PaneResizer
+          ariaLabel="Resize left pane"
+          onResize={(deltaX) =>
+            updateLayoutSize("leftPaneWidth", layoutSizes.leftPaneWidth + deltaX)
+          }
+          onReset={() => resetLayoutSize("leftPaneWidth")}
+        />
+        <section className="terminal-workspace" aria-label="Data workspace">
+          <div className="terminal-search-bar" aria-label="Terminal search">
+            <input
+              ref={searchInputRef}
+              aria-label="Search terminal"
+              value={searchQuery}
+              placeholder="Search terminal"
+              onChange={(event) => {
+                setSearchQuery(event.currentTarget.value);
                 setActiveSearchIndex(0);
               }}
-              onSearchModeChange={(mode) => {
-                setSearchMode(mode);
+            />
+            <select
+              aria-label="Search mode"
+              value={searchMode}
+              onChange={(event) => {
+                setSearchMode(event.currentTarget.value as MatchMode);
                 setActiveSearchIndex(0);
               }}
-              onSearchNext={() =>
-                setActiveSearchIndex((index) => nextSearchIndex(index, searchResult.matches.length))
-              }
-              onSearchPrevious={() =>
+            >
+              <option value="keyword">Text</option>
+              <option value="regex">Regex</option>
+            </select>
+            <button
+              type="button"
+              onClick={() =>
                 setActiveSearchIndex((index) =>
                   previousSearchIndex(index, searchResult.matches.length)
                 )
               }
+              disabled={searchResult.matches.length === 0}
+            >
+              Prev
+            </button>
+            <button
+              type="button"
+              onClick={() =>
+                setActiveSearchIndex((index) => nextSearchIndex(index, searchResult.matches.length))
+              }
+              disabled={searchResult.matches.length === 0}
+            >
+              Next
+            </button>
+            <span className="filter-meta">
+              {searchResult.activeIndex >= 0 ? searchResult.activeIndex + 1 : 0}/
+              {searchResult.matches.length}
+            </span>
+            <button type="button" onClick={() => setShowFiltersPanel((visible) => !visible)}>
+              {showFiltersPanel ? "Hide Inspector" : "Show Inspector"}
+            </button>
+          </div>
+          <TerminalPanel
+            snapshot={terminalSnapshot}
+            lines={filteredTerminalLines}
+            highlightsByLineId={highlightsByLineId}
+            showTimestamps={showTimestamps}
+            timestampFormat={timestampFormat}
+            wrapLines={wrapLines}
+            onToggleTimestamps={() => setShowTimestamps((value) => !value)}
+            onTimestampFormatChange={setTimestampFormat}
+            onViewModeChange={(viewMode) => {
+              const sessionId = activeTerminalSessionIdRef.current;
+
+              if (!sessionId) {
+                return;
+              }
+
+              setTerminalSnapshot(terminalStoreRef.current.setViewMode(sessionId, viewMode));
+            }}
+            onToggleWrapLines={() => setWrapLines((value) => !value)}
+            onClear={clearTerminalDisplay}
+          />
+        </section>
+        {showFiltersPanel ? (
+          <>
+            <PaneResizer
+              ariaLabel="Resize inspector"
+              onResize={(deltaX) =>
+                updateLayoutSize("rightPaneWidth", layoutSizes.rightPaneWidth - deltaX)
+              }
+              onReset={() => resetLayoutSize("rightPaneWidth")}
             />
-          ) : null}
-        </aside>
-        <TerminalPanel
-          snapshot={terminalSnapshot}
-          lines={filteredTerminalLines}
-          highlightsByLineId={highlightsByLineId}
-          showTimestamps={showTimestamps}
-          timestampFormat={timestampFormat}
-          wrapLines={wrapLines}
-          onToggleTimestamps={() => setShowTimestamps((value) => !value)}
-          onTimestampFormatChange={setTimestampFormat}
-          onViewModeChange={(viewMode) => {
-            const sessionId = activeTerminalSessionIdRef.current;
-
-            if (!sessionId) {
-              return;
-            }
-
-            setTerminalSnapshot(terminalStoreRef.current.setViewMode(sessionId, viewMode));
-          }}
-          onToggleWrapLines={() => setWrapLines((value) => !value)}
-          onClear={clearTerminalDisplay}
-        />
+            <aside className="inspector-panel" aria-label="Inspector">
+              <div className="inspector-tabs" role="tablist" aria-label="Inspector tabs">
+                {(["filters", "highlights", "profiles", "logs"] as const).map((tab) => (
+                  <button
+                    type="button"
+                    role="tab"
+                    aria-selected={inspectorTab === tab}
+                    key={tab}
+                    onClick={() => setInspectorTab(tab)}
+                  >
+                    {tab === "filters"
+                      ? `Filters ${filterRules.length}`
+                      : tab === "highlights"
+                        ? `Highlights ${highlightRules.length}`
+                        : tab === "profiles"
+                          ? `Profiles ${filterProfiles.length}`
+                          : logStatus?.active
+                            ? "Log active"
+                            : "Logs"}
+                  </button>
+                ))}
+              </div>
+              {inspectorTab === "logs" ? (
+                <LogPanel
+                  logStatus={logStatus}
+                  lastExportPath={lastExportPath}
+                  logDirectory={appSettings.logging.logDirectory || environment.logDir}
+                  hasTerminalData={filteredTerminalLines.length > 0}
+                  connected={!!activeTerminalSessionId}
+                  busy={logActionBusy}
+                  onStartLog={startActiveLog}
+                  onStopLog={stopActiveLog}
+                  onOpenLogFile={openLogFile}
+                  onOpenLogDirectory={openLogDirectory}
+                  onExportText={() => {
+                    void exportTerminalBuffer();
+                  }}
+                  onExportHtml={() => {
+                    void exportTerminalHtml();
+                  }}
+                  onOpenExport={openLastExport}
+                />
+              ) : (
+                <FilterSearchPanel
+                  showSearch={false}
+                  sections={[inspectorTab]}
+                  highlightRules={highlightRules}
+                  filterRules={filterRules}
+                  filterProfiles={filterProfiles}
+                  warnings={filterWarnings}
+                  searchQuery={searchQuery}
+                  searchMode={searchMode}
+                  searchMatchCount={searchResult.matches.length}
+                  activeSearchIndex={searchResult.activeIndex}
+                  onAddHighlightRule={addHighlightRule}
+                  onToggleHighlightRule={(ruleId, enabled) =>
+                    updateActiveHighlightRules((rules) =>
+                      rules.map((rule) => (rule.id === ruleId ? { ...rule, enabled } : rule))
+                    )
+                  }
+                  onDeleteHighlightRule={(ruleId) =>
+                    updateActiveHighlightRules((rules) =>
+                      rules.filter((rule) => rule.id !== ruleId)
+                    )
+                  }
+                  onAddFilterRule={addFilterRule}
+                  onToggleFilterRule={(ruleId, enabled) =>
+                    updateActiveFilterRules((rules) =>
+                      rules.map((rule) => (rule.id === ruleId ? { ...rule, enabled } : rule))
+                    )
+                  }
+                  onDeleteFilterRule={(ruleId) =>
+                    updateActiveFilterRules((rules) => rules.filter((rule) => rule.id !== ruleId))
+                  }
+                  onSaveFilterProfile={saveFilterProfile}
+                  onApplyFilterProfile={applyFilterProfile}
+                  onDeleteFilterProfile={deleteFilterProfile}
+                  onSearchQueryChange={(query) => {
+                    setSearchQuery(query);
+                    setActiveSearchIndex(0);
+                  }}
+                  onSearchModeChange={(mode) => {
+                    setSearchMode(mode);
+                    setActiveSearchIndex(0);
+                  }}
+                  onSearchNext={() =>
+                    setActiveSearchIndex((index) =>
+                      nextSearchIndex(index, searchResult.matches.length)
+                    )
+                  }
+                  onSearchPrevious={() =>
+                    setActiveSearchIndex((index) =>
+                      previousSearchIndex(index, searchResult.matches.length)
+                    )
+                  }
+                />
+              )}
+            </aside>
+          </>
+        ) : null}
       </section>
 
       {automationMacro ? (
@@ -1858,18 +2184,6 @@ export function App() {
         <span title={environment.logDir}>logs: {environment.logDir}</span>
         {configStatus ? <span title={configStatus.path}>config loaded</span> : null}
         {logStatus?.path ? <span title={logStatus.path}>session log ready</span> : null}
-        <button type="button" onClick={openLogFile} disabled={!logStatus?.path}>
-          Open log file
-        </button>
-        <button type="button" onClick={openLogDirectory}>
-          Open log directory
-        </button>
-        <button type="button" onClick={exportTerminalBuffer}>
-          Export text
-        </button>
-        <button type="button" onClick={exportTerminalHtml}>
-          Export HTML
-        </button>
       </footer>
       <SettingsDialog
         open={settingsOpen}
@@ -1886,6 +2200,132 @@ export function App() {
   );
 }
 
+function LogPanel({
+  logStatus,
+  lastExportPath,
+  logDirectory,
+  hasTerminalData,
+  connected,
+  busy,
+  onStartLog,
+  onStopLog,
+  onOpenLogFile,
+  onOpenLogDirectory,
+  onExportText,
+  onExportHtml,
+  onOpenExport
+}: {
+  logStatus: LogStatus | null;
+  lastExportPath: string | null;
+  logDirectory: string;
+  hasTerminalData: boolean;
+  connected: boolean;
+  busy: boolean;
+  onStartLog: () => void;
+  onStopLog: () => void;
+  onOpenLogFile: () => void;
+  onOpenLogDirectory: () => void;
+  onExportText: () => void;
+  onExportHtml: () => void;
+  onOpenExport: () => void;
+}) {
+  return (
+    <section className="log-panel" aria-label="Logs and exports">
+      <div className="log-section">
+        <h2>Session Log</h2>
+        <p className="log-state">{logStatus?.active ? "Logging active" : "Logging inactive"}</p>
+        <p className="log-path" title={logStatus?.path ?? logDirectory}>
+          {logStatus?.path ?? `Directory: ${logDirectory}`}
+        </p>
+        <div className="log-metrics">
+          <span>RX {logStatus?.rxBytes ?? 0} B</span>
+          <span>Written {logStatus?.loggedBytes ?? 0} B</span>
+          <span>Queued {logStatus?.queuedBytes ?? 0} B</span>
+          <span>Dropped {logStatus?.logOverrunCount ?? 0}</span>
+        </div>
+        {logStatus?.error ? <p className="log-error">{logStatus.error}</p> : null}
+        <div className="log-actions">
+          {logStatus?.active ? (
+            <button type="button" onClick={onStopLog} disabled={busy}>
+              Stop log
+            </button>
+          ) : (
+            <button type="button" onClick={onStartLog} disabled={!connected || busy}>
+              Start log
+            </button>
+          )}
+          <button type="button" onClick={onOpenLogFile} disabled={!logStatus?.path}>
+            Open file
+          </button>
+          <button type="button" onClick={onOpenLogDirectory}>
+            Open folder
+          </button>
+        </div>
+      </div>
+      <div className="log-section">
+        <h2>Exports</h2>
+        <p className="log-path" title={lastExportPath ?? undefined}>
+          {lastExportPath ?? "No exported file yet."}
+        </p>
+        <div className="log-actions">
+          <button type="button" onClick={onExportText} disabled={!hasTerminalData}>
+            Export text
+          </button>
+          <button type="button" onClick={onExportHtml} disabled={!hasTerminalData}>
+            Export HTML
+          </button>
+          <button type="button" onClick={onOpenExport} disabled={!lastExportPath}>
+            Open export
+          </button>
+        </div>
+      </div>
+    </section>
+  );
+}
+
+function PaneResizer({
+  ariaLabel,
+  onResize,
+  onReset
+}: {
+  ariaLabel: string;
+  onResize: (deltaX: number) => void;
+  onReset: () => void;
+}) {
+  const startDrag = (event: ReactPointerEvent<HTMLButtonElement>) => {
+    event.preventDefault();
+    const startX = event.clientX;
+    const pointerId = event.pointerId;
+    const target = event.currentTarget;
+    target.setPointerCapture(pointerId);
+
+    const handlePointerMove = (moveEvent: PointerEvent) => {
+      onResize(moveEvent.clientX - startX);
+    };
+    const handlePointerUp = () => {
+      target.releasePointerCapture(pointerId);
+      window.removeEventListener("pointermove", handlePointerMove);
+      window.removeEventListener("pointerup", handlePointerUp);
+      window.removeEventListener("pointercancel", handlePointerUp);
+    };
+
+    window.addEventListener("pointermove", handlePointerMove);
+    window.addEventListener("pointerup", handlePointerUp);
+    window.addEventListener("pointercancel", handlePointerUp);
+  };
+
+  return (
+    <button
+      type="button"
+      className="pane-resizer"
+      aria-label={ariaLabel}
+      title="Drag to resize. Double-click to reset."
+      onPointerDown={startDrag}
+      onDoubleClick={onReset}
+    />
+  );
+}
+
 function defaultConnectionSettings(settings: AppSettings): TabConnectionSettings {
   return {
     portPath: "",
@@ -1894,12 +2334,26 @@ function defaultConnectionSettings(settings: AppSettings): TabConnectionSettings
 }
 
 function baudRateOptions(settings: AppSettings): string[] {
-  return [...new Set([String(settings.connection.defaultBaudRate), "9600", "115200"])];
+  return [...new Set([...STANDARD_BAUD_RATES, settings.connection.defaultBaudRate])]
+    .sort((left, right) => left - right)
+    .map(String);
 }
 
 function safeDownloadName(name: string): string {
   const normalized = name.trim().replace(/[^a-zA-Z0-9._-]+/g, "_");
   return normalized.length > 0 ? normalized : "terminal-buffer";
+}
+
+function exportFilePath(
+  settings: AppSettings,
+  environment: EnvironmentInfo,
+  title: string,
+  extension: "txt" | "html"
+) {
+  const directory = settings.logging.logDirectory || environment.logDir;
+  const timestamp = new Date().toISOString().slice(0, 19).replace("T", "_").replaceAll(":", "-");
+
+  return joinPath(directory, `exports/${safeDownloadName(title)}_${timestamp}.${extension}`);
 }
 
 function buildAutoLogRequest(settings: AppSettings, portPath: string) {
@@ -1974,6 +2428,50 @@ function platformName(): "linux" | "macos" | "windows" | "other" {
   }
 
   return "other";
+}
+
+function loadLayoutSizes(storage: Storage | null): LayoutSizes {
+  if (!storage) {
+    return defaultLayoutSizes();
+  }
+
+  try {
+    const parsed = JSON.parse(storage.getItem(LAYOUT_STORAGE_KEY) ?? "{}") as Partial<LayoutSizes>;
+
+    return {
+      leftPaneWidth: clamp(
+        Number(parsed.leftPaneWidth ?? LEFT_PANE_DEFAULT_PX),
+        LEFT_PANE_MIN_PX,
+        LEFT_PANE_MAX_PX
+      ),
+      rightPaneWidth: clamp(
+        Number(parsed.rightPaneWidth ?? RIGHT_PANE_DEFAULT_PX),
+        RIGHT_PANE_MIN_PX,
+        RIGHT_PANE_MAX_PX
+      )
+    };
+  } catch {
+    return defaultLayoutSizes();
+  }
+}
+
+function saveLayoutSizes(storage: Storage | null, sizes: LayoutSizes) {
+  storage?.setItem(LAYOUT_STORAGE_KEY, JSON.stringify(sizes));
+}
+
+function defaultLayoutSizes(): LayoutSizes {
+  return {
+    leftPaneWidth: LEFT_PANE_DEFAULT_PX,
+    rightPaneWidth: RIGHT_PANE_DEFAULT_PX
+  };
+}
+
+function clamp(value: number, min: number, max: number) {
+  if (!Number.isFinite(value)) {
+    return min;
+  }
+
+  return Math.min(max, Math.max(min, Math.round(value)));
 }
 
 function browserStorage(): Storage | null {
