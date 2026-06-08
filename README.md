@@ -25,6 +25,14 @@ The project is under active implementation. The macOS path is the most heavily e
 
 Known current release gates are tracked in [TODO.md](TODO.md), with hardware spike results in [docs/spike-results.md](docs/spike-results.md).
 
+## Download
+
+A pre-release build is published on the [Releases page](https://github.com/tpp6me/serial-com-multiplatform/releases).
+
+- **macOS (Apple Silicon / arm64):** download `MultiSerial_<version>_aarch64.dmg`, open it, and drag MultiSerial to Applications. The build is signed with a Developer ID and notarized by Apple, so it opens without a Gatekeeper warning.
+
+These are early pre-release builds and are not yet feature-complete. Intel (x86_64) macOS, Windows, and Linux artifacts are not published yet; build them from source in the meantime (see below and [docs/release-checklist.md](docs/release-checklist.md)).
+
 ## Quick Start For Development
 
 Use the pinned project toolchain rather than global JavaScript tooling:
