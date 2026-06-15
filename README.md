@@ -30,7 +30,7 @@ Known current release gates are tracked in [TODO.md](TODO.md), with hardware spi
 A pre-release build is published on the [Releases page](https://github.com/tpp6me/serial-com-multiplatform/releases).
 
 - **macOS (Apple Silicon / arm64):** download `MultiSerial_<version>_aarch64.dmg`, open it, and drag MultiSerial to Applications. The build is signed with a Developer ID and notarized by Apple, so it opens without a Gatekeeper warning.
-- **Linux (x86_64):** `MultiSerial_<version>_amd64.AppImage` and `MultiSerial_<version>_amd64.deb` are buildable with `corepack pnpm tauri:build` on Ubuntu 24.04 (see [docs/release-checklist.md](docs/release-checklist.md#linux-appimage-and-deb-build)) and have been verified to launch and complete a CP2102 USB-UART loopback. Pre-built Linux artifacts are not yet attached to a release.
+- **Linux (x86_64):** download `MultiSerial_<version>_amd64.AppImage` (`chmod +x` and run directly) or `MultiSerial_<version>_amd64.deb` (`sudo dpkg -i`). Built and verified on Ubuntu 24.04, including launch and a CP2102 USB-UART loopback over `/dev/ttyUSB0`. See [docs/release-checklist.md](docs/release-checklist.md#linux-appimage-and-deb-build) and [docs/linux-permissions.md](docs/linux-permissions.md) for the `dialout` group requirement.
 
 These are early pre-release builds and are not yet feature-complete. Intel (x86_64) macOS and Windows artifacts are not published yet; build them from source in the meantime (see below and [docs/release-checklist.md](docs/release-checklist.md)).
 
