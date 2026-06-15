@@ -21,7 +21,7 @@ The app is intended for embedded, hardware, firmware, and lab workflows where yo
 
 ## Current Status
 
-The project is under active implementation. The macOS path is the most heavily exercised so far, including CP2102 loopback testing. Windows and Linux support are part of the project scope, but cross-OS packaging and hardware validation still require native host testing.
+The project is under active implementation. The macOS path is the most heavily exercised so far, including CP2102 loopback testing. Linux (Ubuntu 24.04) now has a verified AppImage build, launch, and CP2102 loopback over `/dev/ttyUSB0`. Windows support and `.deb` install verification are still pending native host testing.
 
 Known current release gates are tracked in [TODO.md](TODO.md), with hardware spike results in [docs/spike-results.md](docs/spike-results.md).
 
@@ -30,8 +30,9 @@ Known current release gates are tracked in [TODO.md](TODO.md), with hardware spi
 A pre-release build is published on the [Releases page](https://github.com/tpp6me/serial-com-multiplatform/releases).
 
 - **macOS (Apple Silicon / arm64):** download `MultiSerial_<version>_aarch64.dmg`, open it, and drag MultiSerial to Applications. The build is signed with a Developer ID and notarized by Apple, so it opens without a Gatekeeper warning.
+- **Linux (x86_64):** `MultiSerial_<version>_amd64.AppImage` and `MultiSerial_<version>_amd64.deb` are buildable with `corepack pnpm tauri:build` on Ubuntu 24.04 (see [docs/release-checklist.md](docs/release-checklist.md#linux-appimage-and-deb-build)) and have been verified to launch and complete a CP2102 USB-UART loopback. Pre-built Linux artifacts are not yet attached to a release.
 
-These are early pre-release builds and are not yet feature-complete. Intel (x86_64) macOS, Windows, and Linux artifacts are not published yet; build them from source in the meantime (see below and [docs/release-checklist.md](docs/release-checklist.md)).
+These are early pre-release builds and are not yet feature-complete. Intel (x86_64) macOS and Windows artifacts are not published yet; build them from source in the meantime (see below and [docs/release-checklist.md](docs/release-checklist.md)).
 
 ## Quick Start For Development
 

@@ -91,6 +91,40 @@ spctl -a -t open --context context:primary-signature -v "$OUT"
 
 The first `codesign` use of the key may trigger a keychain dialog ("codesign wants to sign using key…") — click **Always Allow**. The output DMG is `aarch64`-only; produce a separate `x86_64` (or universal) build for Intel Macs.
 
+### Linux: AppImage and `.deb` Build
+
+Verified end-to-end on Ubuntu 24.04 (x86_64) on 2026-06-15.
+
+**One-time host setup:**
+
+```bash
+sudo apt-get update && sudo apt-get install -y \
+  libgtk-3-dev libwebkit2gtk-4.1-dev libjavascriptcoregtk-4.1-dev \
+  libsoup-3.0-dev libayatana-appindicator3-dev librsvg2-dev \
+  libudev-dev patchelf
+```
+
+`libudev-dev` is required by the `serialport` crate (`libudev-sys`); the rest are required by `tauri-build`/`wry`/the tray-icon plugin. Without `libudev-dev` the build fails late, during the `libudev-sys` build script, after most of the dependency tree has already compiled.
+
+**Build:**
+
+```bash
+corepack pnpm tauri:build
+```
+
+This produces:
+
+- `src-tauri/target/release/bundle/appimage/MultiSerial_<version>_amd64.AppImage`
+- `src-tauri/target/release/bundle/deb/MultiSerial_<version>_amd64.deb`
+
+The command exits non-zero if `TAURI_SIGNING_PRIVATE_KEY` is unset, because `createUpdaterArtifacts` is enabled — this happens *after* both bundles are written, so the AppImage and `.deb` are still produced and usable. Set `TAURI_SIGNING_PRIVATE_KEY` (and `TAURI_SIGNING_PRIVATE_KEY_PASSWORD`) to also produce signed updater artifacts and a clean exit code.
+
+**Verify:**
+
+- AppImage: `chmod +x` and run directly — launches and renders the full UI under GTK3/WebKitGTK 2.52 on Ubuntu 24.04.
+- `.deb`: declares runtime deps `libwebkit2gtk-4.1-0 | libwebkit2gtk-4.0-37`, `libgtk-3-0`, `libayatana-appindicator3-1`. Install with `sudo dpkg -i` and launch `multiSerial` from the app menu or a terminal.
+- Serial permissions: confirm the current user is in the `dialout` group (`groups`). If not, `sudo usermod -aG dialout "$USER"` and fully log out/in — see [Linux Permissions](linux-permissions.md). With group membership active, port enumeration and a CP2102 USB-UART loopback connect/send/receive succeeded on `/dev/ttyUSB0`.
+
 ## Updater Gates
 
 - Publish a signed updater manifest for each release channel.

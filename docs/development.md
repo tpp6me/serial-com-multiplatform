@@ -81,6 +81,15 @@ Some OS-level build dependencies are unavoidable:
 
 - macOS: Xcode Command Line Tools and WebKit provided by the OS.
 - Windows: Microsoft C++ Build Tools and WebView2 runtime.
-- Linux: WebKitGTK and standard Tauri Linux build packages.
+- Linux: WebKitGTK and standard Tauri Linux build packages. Verified on Ubuntu 24.04:
+
+  ```bash
+  sudo apt-get update && sudo apt-get install -y \
+    libgtk-3-dev libwebkit2gtk-4.1-dev libjavascriptcoregtk-4.1-dev \
+    libsoup-3.0-dev libayatana-appindicator3-dev librsvg2-dev \
+    libudev-dev patchelf
+  ```
+
+  `libudev-dev` is required by the `serialport` crate's `libudev-sys` dependency; the rest are required by `tauri-build`/`wry`/`tray-icon`.
 
 Do not install project JavaScript tools globally. If a command requires a global package, treat that as a project bug and add it to `package.json`.

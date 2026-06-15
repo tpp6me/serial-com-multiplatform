@@ -87,18 +87,18 @@ Goal: prove high-risk assumptions before production implementation.
 
 ### 1.5 Linux WebView Spike
 
-- [!] `SPIKE-040` Run Tauri app on Ubuntu 22.04. Requires Ubuntu/WebKitGTK environment; current work is on macOS.
-- [!] `SPIKE-041` Verify terminal virtual list rendering in WebKitGTK. Requires Ubuntu/WebKitGTK environment; current work is on macOS.
-- [!] `SPIKE-042` Verify font weight normalization strategy. Requires Ubuntu/WebKitGTK environment; current work is on macOS.
-- [!] `SPIKE-043` Verify CSS transition restrictions for terminal/status paths. Requires Ubuntu/WebKitGTK environment; current work is on macOS.
-- [!] `SPIKE-044` Capture Linux rendering notes and required CSS compatibility layer. Requires Ubuntu/WebKitGTK environment; current work is on macOS.
+- [x] `SPIKE-040` Run Tauri app on Ubuntu 22.04. Ran the packaged AppImage on Ubuntu 24.04.4 LTS (GTK 3.24.41, WebKitGTK 2.52.3) on 2026-06-15; Ubuntu 22.04 specifically remains unverified. See [spike-results.md](docs/spike-results.md#linux-build-launch-and-hardware-validation).
+- [~] `SPIKE-041` Verify terminal virtual list rendering in WebKitGTK. Main UI (toolbar, port list, terminal, inspector) rendered correctly on Ubuntu 24.04 on 2026-06-15; a dedicated high-rate terminal feed check was not run.
+- [!] `SPIKE-042` Verify font weight normalization strategy. Requires a focused visual comparison; not checked during the 2026-06-15 Linux build/launch pass.
+- [!] `SPIKE-043` Verify CSS transition restrictions for terminal/status paths. Requires a focused visual comparison; not checked during the 2026-06-15 Linux build/launch pass.
+- [!] `SPIKE-044` Capture Linux rendering notes and required CSS compatibility layer. Requires a focused visual comparison; not checked during the 2026-06-15 Linux build/launch pass.
 
 ### 1.6 Packaging Spike
 
 - [x] `SPIKE-050` Build macOS `.dmg` development artifact. `node scripts/run-with-dev-env.mjs corepack pnpm exec tauri build --bundles dmg` produced `src-tauri/target/release/bundle/dmg/MultiSerial_0.1.0_aarch64.dmg` on 2026-05-28; macOS `hdiutil` must run outside the Codex sandbox.
 - [!] `SPIKE-051` Build Windows NSIS development artifact. Requires Windows build host or Windows CI; macOS Tauri CLI only exposes host-supported bundle targets and produced no NSIS artifact.
-- [!] `SPIKE-052` Build Linux AppImage development artifact. Requires Linux build host or Linux CI; macOS Tauri CLI only exposes host-supported bundle targets.
-- [!] `SPIKE-053` Build Linux `.deb` development artifact. Requires Linux build host or Linux CI; macOS Tauri CLI only exposes host-supported bundle targets.
+- [x] `SPIKE-052` Build Linux AppImage development artifact. `corepack pnpm tauri:build` produced `src-tauri/target/release/bundle/appimage/MultiSerial_0.1.0_amd64.AppImage` on Ubuntu 24.04 on 2026-06-15.
+- [x] `SPIKE-053` Build Linux `.deb` development artifact. `corepack pnpm tauri:build` produced `src-tauri/target/release/bundle/deb/MultiSerial_0.1.0_amd64.deb` on Ubuntu 24.04 on 2026-06-15.
 - [x] `SPIKE-054` Validate Tauri updater support for macOS. Tauri v2 updater supports macOS and creates `.app.tar.gz` plus `.sig` artifacts when configured with `createUpdaterArtifacts` and signing keys.
 - [x] `SPIKE-055` Validate Tauri updater support for Windows. Tauri v2 updater supports Windows NSIS/MSI update artifacts when configured with `createUpdaterArtifacts` and signing keys.
 - [x] `SPIKE-056` Validate Tauri updater support for Linux packages. Tauri v2 updater supports Linux artifacts; `.deb` signature support is present in the Tauri CLI line newer than 2.2.0, and this project uses CLI 2.11.2.
@@ -109,7 +109,7 @@ Goal: prove high-risk assumptions before production implementation.
 - [!] `GATE-000` Zero byte loss in 10 MB hardware loopback at 921600 baud on at least one supported OS. CP2102 macOS rerun did not meet the gate on 2026-05-29; rerun with another adapter/OS before release readiness.
 - [x] `GATE-001` Synthetic renderer feed passes 100,000 chars/sec target.
 - [!] `GATE-002` Hotplug updates under 2 seconds after OS event. CP2102 macOS run did not meet timing target on 2026-05-28.
-- [!] `GATE-003` Linux WebKitGTK rendering is acceptable. Requires Ubuntu/WebKitGTK environment; current work is on macOS.
+- [~] `GATE-003` Linux WebKitGTK rendering is acceptable. Main UI rendered correctly on Ubuntu 24.04/WebKitGTK 2.52.3 on 2026-06-15; the focused font-weight/transition checks (`SPIKE-042`/`SPIKE-043`) remain open.
 - [x] `GATE-004` Packaging skeleton exists for macOS, Windows, AppImage, and `.deb`.
 - [x] `GATE-005` Raw IPC, binary log format, updater, and hardware matrix decisions are documented.
 
@@ -203,7 +203,7 @@ Goal: create the production app scaffold and CI spine.
 
 ### 2.6 Phase 1 Exit Gate
 
-- [!] `GATE-010` App launches on macOS, Windows, and Linux. macOS build/launch path is locally buildable; Windows and Linux launch verification require native runners or CI.
+- [~] `GATE-010` App launches on macOS, Windows, and Linux. macOS and Linux (Ubuntu 24.04 AppImage, 2026-06-15) build/launch paths are verified; Windows launch verification requires a native runner or CI.
 - [~] `GATE-011` CI passes frontend, Rust, lint, and formatting checks. Workflow is configured across macOS, Windows, and Ubuntu; remote pass cannot be proven until these dirty changes are committed and pushed.
 - [x] `GATE-012` Invalid config recovery test passes. Completed 2026-05-28.
 - [x] `GATE-013` All exposed Tauri commands are listed in capabilities file. `src-tauri/build.rs` generates app-command permissions and `src-tauri/capabilities/default.json` lists every command in `tauri::generate_handler!`.
@@ -737,9 +737,9 @@ Goal: produce release candidate artifacts.
 - [x] `PKG-LINUX-002` Configure AppImage arm64. AppImage config is architecture-neutral; arm64 artifact creation requires Linux arm64 runner or cross-build CI.
 - [x] `PKG-LINUX-003` Configure `.deb` x64. Added Debian section, priority, and WebKitGTK/GTK/AppIndicator dependency metadata.
 - [!] `PKG-LINUX-004` Verify Ubuntu 22.04 install. Requires Ubuntu 22.04 host or CI runner.
-- [!] `PKG-LINUX-005` Verify Ubuntu 24.04 install. Requires Ubuntu 24.04 host or CI runner.
-- [!] `PKG-LINUX-006` Verify `dialout` guidance. Requires Linux install/run documentation pass and serial device permissions check.
-- [!] `PKG-LINUX-007` Verify WebKitGTK dependency behavior. Requires Linux package install checks.
+- [~] `PKG-LINUX-005` Verify Ubuntu 24.04 install. AppImage built and launched successfully on Ubuntu 24.04.4 LTS on 2026-06-15; `.deb` install via `dpkg -i` not yet run.
+- [x] `PKG-LINUX-006` Verify `dialout` guidance. Confirmed on Ubuntu 24.04 on 2026-06-15: `/dev/ttyUSB0`/`/dev/ttyS*` are `root:dialout`, and `sudo usermod -aG dialout "$USER"` plus a new login session resolves connect failures, matching [linux-permissions.md](docs/linux-permissions.md).
+- [x] `PKG-LINUX-007` Verify WebKitGTK dependency behavior. Build-time deps (`libgtk-3-dev`, `libwebkit2gtk-4.1-dev`, `libjavascriptcoregtk-4.1-dev`, `libsoup-3.0-dev`, `libayatana-appindicator3-dev`, `librsvg2-dev`, `libudev-dev`, `patchelf`) confirmed on Ubuntu 24.04 on 2026-06-15; see [release-checklist.md](docs/release-checklist.md).
 - [!] `PKG-LINUX-008` Verify ModemManager retry messaging. Requires Linux host with ModemManager conflict scenario.
 
 ### 10.5 Updater
@@ -772,8 +772,8 @@ Goal: produce release candidate artifacts.
 
 - [!] `GATE-090` macOS release candidate installs and launches. Requires an RC installer/app artifact and interactive install/launch smoke test.
 - [!] `GATE-091` Windows release candidate installs and launches. Requires Windows signed installer artifact and Windows host.
-- [!] `GATE-092` Linux AppImage release candidate launches. Requires Linux AppImage artifact and Linux host.
-- [!] `GATE-093` Linux `.deb` release candidate installs and launches. Requires Linux `.deb` artifact and Linux host.
+- [x] `GATE-092` Linux AppImage release candidate launches. `MultiSerial_0.1.0_amd64.AppImage` built and launched on Ubuntu 24.04 on 2026-06-15 with full UI rendering.
+- [!] `GATE-093` Linux `.deb` release candidate installs and launches. `.deb` artifact built on 2026-06-15; `dpkg -i` install/launch not yet run.
 - [!] `GATE-094` Updater behavior matches final v1.0 decision. Requires published signed update manifests and per-OS installed-app update tests.
 - [x] `GATE-095` Documentation matches implemented behavior. Local docs scan on 2026-05-28 found updater, mock test, privacy, packaging, and platform limitation docs aligned with current implementation and blockers.
 
@@ -910,9 +910,9 @@ Use this section to record completion of repeatable self-tests. Keep detailed lo
 - [!] `TEST-PKG-004` Windows installer installs. Requires Windows signed installer artifact and Windows host.
 - [!] `TEST-PKG-005` Windows app launches. Requires Windows host.
 - [!] `TEST-PKG-006` Windows COM port access works. Requires Windows host with serial hardware.
-- [!] `TEST-PKG-007` Linux AppImage launches. Requires Linux AppImage artifact and Linux host.
-- [!] `TEST-PKG-008` Linux `.deb` installs. Requires Linux `.deb` artifact and Linux host.
-- [!] `TEST-PKG-009` Linux serial access works with dialout permissions. Requires Linux host with serial hardware and permissions validation.
+- [x] `TEST-PKG-007` Linux AppImage launches. Verified on Ubuntu 24.04 on 2026-06-15.
+- [!] `TEST-PKG-008` Linux `.deb` installs. Requires `dpkg -i` install/launch run; not yet performed.
+- [x] `TEST-PKG-009` Linux serial access works with dialout permissions. After adding the user to `dialout` and starting a new session, a CP2102 USB-UART adapter on `/dev/ttyUSB0` connected and passed a manual loopback test on Ubuntu 24.04 on 2026-06-15.
 - [!] `TEST-PKG-010` Installer/uninstaller behavior passes. Requires OS-specific installer runs on macOS, Windows, and Linux.
 - [x] `TEST-PKG-011` Package names match naming conventions. Built app bundle uses `MultiSerial.app`, executable `multiSerial`, and identifier `com.bifrostsscom.multiserial`.
 

@@ -28,7 +28,7 @@ Date: 2026-05-28
 - macOS DMG bundling passes on Apple Silicon with `node scripts/run-with-dev-env.mjs corepack pnpm exec tauri build --bundles dmg`.
 - The generated artifact is `src-tauri/target/release/bundle/dmg/MultiSerial_0.1.0_aarch64.dmg`.
 - `hdiutil` cannot create the DMG from inside the Codex sandbox (`Device not configured`); run the packaging command outside the sandbox or approve an escalated packaging command.
-- Windows NSIS, Linux AppImage, and Linux `.deb` artifacts require native OS runners or CI. On macOS, `tauri build --help` only lists host-supported `ios`, `app`, and `dmg` bundle values.
+- Windows NSIS, Linux AppImage, and Linux `.deb` artifacts require native OS runners or CI. On macOS, `tauri build --help` only lists host-supported `ios`, `app`, and `dmg` bundle values. See [Linux Build, Launch, and Hardware Validation](#linux-build-launch-and-hardware-validation) below for the verified Linux build.
 
 ## Updater
 
@@ -37,9 +37,20 @@ Date: 2026-05-28
 - Phase 9 still needs published signed release manifests, production update endpoints, and per-OS install/update smoke tests.
 - Keep Linux updater behavior in v1.0 scope. If signed AppImage/`.deb` update validation fails in Phase 9, release Linux as update-check-only and document the limitation before RC.
 
+## Linux Build, Launch, and Hardware Validation
+
+Date: 2026-06-15, Ubuntu 24.04.4 LTS (x86_64).
+
+- `corepack pnpm tauri:build` succeeds after installing `libgtk-3-dev`, `libwebkit2gtk-4.1-dev`, `libjavascriptcoregtk-4.1-dev`, `libsoup-3.0-dev`, `libayatana-appindicator3-dev`, `librsvg2-dev`, `libudev-dev`, and `patchelf`. `libudev-dev` is the easy one to miss — its absence only surfaces as a `libudev-sys` build-script failure after most of the dependency tree has compiled.
+- Produces `src-tauri/target/release/bundle/appimage/MultiSerial_0.1.0_amd64.AppImage` and `src-tauri/target/release/bundle/deb/MultiSerial_0.1.0_amd64.deb`.
+- The overall `tauri:build` command exits non-zero because `createUpdaterArtifacts` is enabled and `TAURI_SIGNING_PRIVATE_KEY` is unset, but this happens after both bundles are written — the AppImage and `.deb` are valid and usable.
+- The AppImage launches on a real Ubuntu 24.04 desktop session (GTK 3.24.41, WebKitGTK 2.52.3) and renders the full UI correctly: toolbar, port list, terminal, inspector panels, and status bar all match the macOS layout.
+- Serial device permissions: `/dev/ttyUSB0` (and `/dev/ttyS*`) are `root:dialout`. A user not in the `dialout` group sees the port listed but cannot connect. Adding the user with `sudo usermod -aG dialout "$USER"` and starting a new login session resolves it, confirming the existing [Linux Permissions](linux-permissions.md) guidance is accurate.
+- Hardware loopback: with `dialout` group active, a Silicon Labs CP2102 USB-UART adapter on `/dev/ttyUSB0` was selected, connected at 115200 8N1, and passed a manual send/receive loopback test from the packaged AppImage.
+
 ## Blocked Hardware/OS Checks
 
 - CP2102 macOS hotplug timing did not meet the 2-second target in the interactive hardware test. The `/dev/cu.usbserial-0001` run detected removal in 11,919 ms and insertion in 22,330 ms. The same run found no duplicate serial port paths.
 - FTDI, CH340/CH341, and CDC-ACM loopback checks require additional hardware. The current macOS USB inventory only identifies a Silicon Labs CP2102 adapter.
-- Linux WebKitGTK checks require an Ubuntu 22.04/24.04 environment.
+- `.deb` install/launch (`PKG-LINUX-004`/`005`, `TEST-PKG-008`), Ubuntu 22.04 verification, and ModemManager conflict scenarios remain unverified.
 - Windows packaging/updater checks require a Windows 10/11 environment.
