@@ -249,13 +249,13 @@ impl SerialBackend for RealSerialBackend {
     }
 
     fn open_port(&self, config: &SerialConfig) -> Result<Box<dyn SerialPortHandle>, SerialError> {
-        let port =
-            apply_config_to_builder(config)?
-                .open()
-                .map_err(|source| SerialError::OpenPort {
-                    port_path: config.port_path.clone(),
-                    message: source.to_string(),
-                })?;
+        let port = apply_config_to_builder(config)?
+            .timeout(Duration::from_millis(10))
+            .open()
+            .map_err(|source| SerialError::OpenPort {
+                port_path: config.port_path.clone(),
+                message: source.to_string(),
+            })?;
 
         Ok(Box::new(RealSerialPortHandle { port }))
     }
@@ -273,19 +273,11 @@ impl SerialPortHandle for RealSerialPortHandle {
     }
 
     fn read_available(&mut self, buffer: &mut [u8]) -> Result<usize, SerialError> {
-        let available = self
-            .port
-            .bytes_to_read()
-            .map_err(|source| SerialError::Read {
-                message: source.to_string(),
-            })?;
-
-        if available == 0 || buffer.is_empty() {
+        if buffer.is_empty() {
             return Ok(0);
         }
 
-        let read_len = buffer.len().min(available as usize);
-        match self.port.read(&mut buffer[..read_len]) {
+        match self.port.read(buffer) {
             Ok(bytes_read) => Ok(bytes_read),
             Err(source) if matches!(source.kind(), ErrorKind::TimedOut | ErrorKind::WouldBlock) => {
                 Ok(0)
@@ -2217,6 +2209,37 @@ mod tests {
         assert_eq!(first_batch.chunks.len(), 2);
         assert_eq!(second_batch.rx_bytes, 2);
         assert!(second_batch.chunks.is_empty());
+    }
+
+    #[test]
+    fn session_manager_continues_polling_after_empty_rx_poll() {
+        let mut manager = SessionManager::new(MockSerialBackend::with_rx(
+            vec![mock_port("/dev/ttyUSB0", "Adapter A")],
+            vec![Vec::new(), vec![0x41, 0x42]],
+        ));
+        let opened = manager
+            .open_session(OpenSessionRequest {
+                config: valid_config_input("/dev/ttyUSB0"),
+                auto_log: None,
+            })
+            .expect("session should open");
+
+        let empty_poll = manager
+            .poll_rx_once(&opened.session_id)
+            .expect("empty rx poll should pass");
+        let next_poll = manager
+            .poll_rx_once(&opened.session_id)
+            .expect("later rx poll should pass");
+        let batch = manager.drain_rx(&opened.session_id).unwrap();
+
+        assert!(empty_poll.is_none());
+        assert_eq!(
+            next_poll.expect("later rx chunk should exist").bytes,
+            vec![0x41, 0x42]
+        );
+        assert_eq!(batch.rx_bytes, 2);
+        assert_eq!(batch.chunks.len(), 1);
+        assert_eq!(batch.chunks[0].bytes, vec![0x41, 0x42]);
     }
 
     #[test]

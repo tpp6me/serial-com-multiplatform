@@ -101,6 +101,30 @@ export function buildTerminalLines(
       clearPendingLine(pending);
     }
 
+    if (
+      shouldFlushPendingBeforeFrame(
+        pending,
+        frame,
+        options.partialLineTimeoutMs ?? DEFAULT_PARTIAL_LINE_TIMEOUT_MS
+      )
+    ) {
+      lines.push(
+        makeLine({
+          bytes: pending.bytes,
+          firstSequence: pending.firstSequence ?? frame.sequence,
+          lastSequence: pending.lastSequence ?? frame.sequence,
+          timestampWallMs: pending.timestampWallMs ?? frame.timestampWallMs,
+          direction: pending.direction ?? frame.direction,
+          viewMode: options.viewMode,
+          maxVisualLineBytes,
+          complete: false,
+          timedOut: true,
+          flushedOnClose: false
+        })
+      );
+      clearPendingLine(pending);
+    }
+
     if (isDelimiter(frames, index, newlineMode)) {
       lines.push(
         emitPendingLine(pending, frame, {
@@ -191,6 +215,18 @@ function clearPendingLine(pending: PendingLine) {
   pending.timestampWallMs = null;
   pending.lastTimestampWallMs = null;
   pending.direction = null;
+}
+
+function shouldFlushPendingBeforeFrame(
+  pending: PendingLine,
+  frame: ByteFrame,
+  partialLineTimeoutMs: number
+): boolean {
+  if (pending.bytes.length === 0 || pending.lastTimestampWallMs === null) {
+    return false;
+  }
+
+  return frame.timestampWallMs - pending.lastTimestampWallMs >= partialLineTimeoutMs;
 }
 
 function isDelimiter(
@@ -320,7 +356,21 @@ function makeLine(options: {
 }
 
 function renderUtf8(bytes: Uint8Array): string {
-  return textDecoder.decode(bytes).replaceAll("\u0000", "\u2400");
+  return Array.from(textDecoder.decode(bytes))
+    .map((character) => {
+      const codePoint = character.codePointAt(0) ?? 0;
+
+      if (codePoint === 0x00) {
+        return "\u2400";
+      }
+
+      if (isControlCodePoint(codePoint)) {
+        return `<${formatHexByte(codePoint)}>`;
+      }
+
+      return character;
+    })
+    .join("");
 }
 
 function renderMixedByte(byte: number): string {
@@ -333,6 +383,10 @@ function renderMixedByte(byte: number): string {
   }
 
   return `<${formatHexByte(byte)}>`;
+}
+
+function isControlCodePoint(codePoint: number): boolean {
+  return codePoint < 0x20 || (codePoint >= 0x7f && codePoint <= 0x9f);
 }
 
 function formatHexByte(byte: number): string {

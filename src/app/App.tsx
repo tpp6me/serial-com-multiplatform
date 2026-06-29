@@ -75,6 +75,7 @@ import {
 } from "../shortcuts";
 import {
   buildTerminalLines,
+  DEFAULT_PARTIAL_LINE_TIMEOUT_MS,
   TerminalPanel,
   TerminalSessionStore,
   type BackendRxBatch,
@@ -322,6 +323,7 @@ export function App() {
     sessionTabStoreRef.current.snapshot()
   );
   const [terminalSnapshot, setTerminalSnapshot] = useState<TerminalSessionSnapshot | null>(null);
+  const [terminalRenderNow, setTerminalRenderNow] = useState(() => Date.now());
   const [showTimestamps, setShowTimestamps] = useState(false);
   const [timestampFormat, setTimestampFormat] = useState<TimestampFormat>("time");
   const [wrapLines, setWrapLines] = useState(true);
@@ -383,10 +385,10 @@ export function App() {
         ? buildTerminalLines(terminalSnapshot.chunks, {
             viewMode: terminalSnapshot.viewMode,
             newlineMode: "lf",
-            nowWallMs: Date.now()
+            nowWallMs: terminalRenderNow
           })
         : [],
-    [terminalSnapshot]
+    [terminalRenderNow, terminalSnapshot]
   );
   const lineView = useMemo(
     () => buildLineView(terminalLines, { filters: filterRules, highlights: highlightRules }),
@@ -798,6 +800,24 @@ export function App() {
       activeTerminalSessionId ? macroConfigStoreRef.current.list(activeTerminalSessionId) : []
     );
   }, [activeTerminalSessionId]);
+
+  useEffect(() => {
+    const lastUpdatedAtWallMs = terminalSnapshot?.lastUpdatedAtWallMs;
+
+    if (lastUpdatedAtWallMs === null || lastUpdatedAtWallMs === undefined) {
+      return;
+    }
+
+    const elapsedMs = Date.now() - lastUpdatedAtWallMs;
+    const timeoutMs = Math.max(0, DEFAULT_PARTIAL_LINE_TIMEOUT_MS - elapsedMs + 1);
+    const timeoutId = window.setTimeout(() => {
+      setTerminalRenderNow(Date.now());
+    }, timeoutMs);
+
+    return () => {
+      window.clearTimeout(timeoutId);
+    };
+  }, [terminalSnapshot?.lastUpdatedAtWallMs]);
 
   useEffect(() => {
     let cancelled = false;
@@ -2021,6 +2041,7 @@ export function App() {
             }}
             onToggleWrapLines={() => setWrapLines((value) => !value)}
             onClear={clearTerminalDisplay}
+            nowWallMs={terminalRenderNow}
           />
         </section>
         {showFiltersPanel ? (

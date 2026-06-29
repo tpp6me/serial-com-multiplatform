@@ -29,6 +29,12 @@ describe("renderBytes", () => {
     expect(renderBytes(Uint8Array.from([0x41, 0x00, 0x1b]), "mixed")).toBe("A\u2400<1B>");
   });
 
+  it("renders UTF-8 control bytes visibly", () => {
+    expect(renderBytes(Uint8Array.from([0x02, 0x03, 0x00, 0x2b, 0x01]), "utf8")).toBe(
+      "<02><03>\u2400+<01>"
+    );
+  });
+
   it("renders hexadecimal, decimal, binary, and mixed display modes", () => {
     const bytes = Uint8Array.from([0x00, 0x2a, 0xff]);
     const expectedByMode: Record<Exclude<TerminalViewMode, "utf8">, string> = {
@@ -95,6 +101,64 @@ describe("buildTerminalLines", () => {
       timedOut: true,
       flushedOnClose: false
     });
+  });
+
+  it("flushes sparse binary frames without requiring a trailing newline", () => {
+    const deviceFrame = [0x02, 0x03, 0x00, 0x2b, 0x00, 0x01, 0xf4, 0x31];
+    const linesBeforeTimeout = buildTerminalLines([chunk(1, deviceFrame, 1_000)], {
+      viewMode: "hex",
+      newlineMode: "lf",
+      nowWallMs: 1_100,
+      partialLineTimeoutMs: 250
+    });
+    const linesAfterTimeout = buildTerminalLines([chunk(1, deviceFrame, 1_000)], {
+      viewMode: "hex",
+      newlineMode: "lf",
+      nowWallMs: 1_251,
+      partialLineTimeoutMs: 250
+    });
+
+    expect(linesBeforeTimeout).toEqual([]);
+    expect(linesAfterTimeout).toHaveLength(1);
+    expect(linesAfterTimeout[0]).toMatchObject({
+      text: "02 03 00 2B 00 01 F4 31",
+      rawByteLength: 8,
+      complete: false,
+      timedOut: true
+    });
+
+    const utf8LinesAfterTimeout = buildTerminalLines([chunk(1, deviceFrame, 1_000)], {
+      viewMode: "utf8",
+      newlineMode: "lf",
+      nowWallMs: 1_251,
+      partialLineTimeoutMs: 250
+    });
+
+    expect(utf8LinesAfterTimeout[0].text).toBe("<02><03>\u2400+\u2400<01>\uFFFD1");
+  });
+
+  it("splits sparse no-newline frames after idle gaps", () => {
+    const lines = buildTerminalLines(
+      [
+        chunk(1, [0x02, 0x03, 0x00, 0x05, 0x00, 0x01, 0x94, 0x38], 1_000),
+        chunk(2, [0x02, 0x03, 0x00, 0x14, 0x00, 0x01, 0xc4, 0x3d], 61_000),
+        chunk(3, [0x02, 0x03, 0x00, 0x2c, 0x00, 0x02, 0x05, 0xf1], 121_000)
+      ],
+      {
+        viewMode: "hex",
+        newlineMode: "lf",
+        nowWallMs: 121_251,
+        partialLineTimeoutMs: 250
+      }
+    );
+
+    expect(lines.map((line) => line.text)).toEqual([
+      "02 03 00 05 00 01 94 38",
+      "02 03 00 14 00 01 C4 3D",
+      "02 03 00 2C 00 02 05 F1"
+    ]);
+    expect(lines.map((line) => line.rawByteLength)).toEqual([8, 8, 8]);
+    expect(lines.every((line) => line.timedOut)).toBe(true);
   });
 
   it("flushes partial lines on close", () => {
